@@ -202,11 +202,19 @@ def verify_post(phase_dir_arg):
     lint.py::verify_post docstring on the same point. A future editor must
     not "fix" this back to a leave-it-alone behavior.
 
-    The one exception left uncaught on purpose: `check_buckets()` raises
-    `RuntimeError` for a `gh pr checks` non-zero exit whose stderr matches
-    neither documented zero-checks string (RESEARCH Pitfall 3) -- a genuine
-    tool failure that is not the zero-checks case must not be laundered into
-    any `pr_status`.
+    `check_buckets()` raises `RuntimeError` for a `gh pr checks` non-zero
+    exit whose stderr matches neither documented zero-checks string
+    (RESEARCH Pitfall 3) -- a genuine tool failure that is not the
+    zero-checks case must not be laundered into a `pr_status` of `passing`
+    or `failing`. It IS caught here, separately from the fail-open tuple
+    above, and returns exit 1 (not 0): under this dispatch point's
+    `onError: skip` contract, an UNCAUGHT exception does not fail the
+    phase -- it only skips regenerating PR.md, leaving whatever the
+    PREVIOUS successful run wrote (e.g. `pr_gate_ok: true`) stale on disk,
+    which is exactly the "stale status satisfies the gate" failure T-14-01
+    exists to prevent. Catching and still writing the `unavailable`
+    sentinel keeps both properties: the failure is loud (nonzero exit,
+    printed message) AND the artifact is never stale.
     """
     phase_dir = Path(phase_dir_arg).resolve()
     project_root = find_project_root(phase_dir)
@@ -245,11 +253,17 @@ def verify_post(phase_dir_arg):
         # the count rather than silently collapsing it.
         open_pr_count = len(prs)
         pr_number = prs[0]["number"]
+        checks_generated_from = generated_from + f"; gh pr checks {pr_number} --json bucket"
         buckets = check_buckets(pr_number)
         pr_status = rollup_pr_status(buckets)
         pr_gate_ok = derive_gate_ok(pr_status)
-        generated_from += f"; gh pr checks {pr_number} --json bucket"
+        generated_from = checks_generated_from
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, GhCommandError) as exc:
+        # GhCommandError IS-A RuntimeError (see its class docstring) --
+        # this clause must stay ordered BEFORE the bare `except RuntimeError`
+        # below so a GhCommandError (fail-open eligible) is never caught by
+        # the more general clause meant only for check_buckets()'s plain
+        # RuntimeError (a genuine, non-fail-open tool failure).
         print(NOTICE_GH_ERROR)
         _write_report(
             out_path, phase_dir, generated_at,
@@ -259,6 +273,16 @@ def verify_post(phase_dir_arg):
             unavailable_reason=f"{type(exc).__name__}: {exc}",
         )
         return 0
+    except RuntimeError as exc:
+        print(f"gh pr checks failed: {exc}")
+        _write_report(
+            out_path, phase_dir, generated_at,
+            generated_from="none (gh pr checks failed)",
+            pr_status="unavailable", pr_gate_ok=False,
+            pr_number=None, open_pr_count=0,
+            unavailable_reason=f"RuntimeError: {exc}",
+        )
+        return 1
 
     _write_report(
         out_path, phase_dir, generated_at, generated_from=generated_from,

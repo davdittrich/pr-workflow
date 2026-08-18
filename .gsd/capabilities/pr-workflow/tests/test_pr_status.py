@@ -347,9 +347,20 @@ class TestFailOpen(unittest.TestCase):
             self.assertIn("pr_status: passing", text)
             self.assertIn("pr_gate_ok: true", text)
 
-    def test_checks_unrelated_stderr_raises(self):
+    def test_checks_unrelated_stderr_writes_sentinel_and_returns_nonzero(self):
+        # check_buckets() still raises plain RuntimeError for a genuine
+        # gh pr checks failure -- but verify_post now catches it rather
+        # than letting it propagate uncaught. Under this dispatch point's
+        # onError:skip contract, an uncaught exception would skip
+        # regenerating PR.md entirely, leaving a stale prior-run status
+        # (e.g. pr_gate_ok: true) sitting there, silently satisfying
+        # ship:pre on unmeasured data. Loud (exit 1) but never stale.
         with tempfile.TemporaryDirectory() as tmp:
             phase_dir = _write_phase_dir(Path(tmp))
+            report_path = phase_dir / "14-PR.md"
+            report_path.write_text(
+                "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n", encoding="utf-8"
+            )
 
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
@@ -362,10 +373,47 @@ class TestFailOpen(unittest.TestCase):
                     return _completed("", 1, stderr="thread panicked at checks.go:1:1")
                 raise AssertionError(f"unexpected call: {argv}")
 
+            captured = io.StringIO()
             with mock.patch("shutil.which", return_value="/usr/bin/gh"):
                 with mock.patch("subprocess.run", side_effect=fake_run):
-                    with self.assertRaises(RuntimeError):
-                        pr_status.verify_post(str(phase_dir))
+                    with mock.patch("sys.stdout", captured):
+                        exit_code = pr_status.verify_post(str(phase_dir))
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("gh pr checks failed", captured.getvalue())
+            text = report_path.read_text(encoding="utf-8")
+            self.assertIn("pr_status: unavailable", text)
+            self.assertIn("pr_gate_ok: false", text)
+            self.assertIn("unavailable_reason: RuntimeError", text)
+            self.assertNotIn("pr_status: passing", text)
+            self.assertNotIn("pr_gate_ok: true", text)
+
+    def test_gh_command_error_still_fails_open_not_caught_by_runtime_error_clause(self):
+        # GhCommandError IS-A RuntimeError. It must stay routed through the
+        # fail-open tuple's except clause (exit 0), never the bare
+        # `except RuntimeError` meant only for check_buckets()'s genuine
+        # tool failure -- the two must not collapse into one behavior.
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+
+            def fake_run(argv, **kwargs):
+                if argv[:3] == ["gh", "auth", "status"]:
+                    return _completed("", 0)
+                if argv[:3] == ["git", "branch", "--show-current"]:
+                    return _completed("main\n", 0)
+                if argv[:3] == ["gh", "pr", "list"]:
+                    return _completed("", 1, stderr="HTTP 403: rate limited")
+                raise AssertionError(f"unexpected call: {argv}")
+
+            captured = io.StringIO()
+            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
+                with mock.patch("subprocess.run", side_effect=fake_run):
+                    with mock.patch("sys.stdout", captured):
+                        exit_code = pr_status.verify_post(str(phase_dir))
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ERROR), 1)
+            self.assertNotIn("gh pr checks failed", captured.getvalue())
 
 
 class TestNoticeDistinctness(unittest.TestCase):
