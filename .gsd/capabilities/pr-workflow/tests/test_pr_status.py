@@ -40,6 +40,26 @@ def _fixture(name):
     return (FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
+def _without_timestamp(text):
+    """Drop the live `generated_at:` line so two runs are byte-comparable."""
+    return "\n".join(l for l in text.splitlines() if not l.startswith("generated_at:"))
+
+
+def _frontmatter(text):
+    """Parse the report's frontmatter into a dict the way a last-wins YAML
+    reader would -- later duplicate keys overwrite earlier ones. That is the
+    lens the ship:pre gate sees, so it is the lens to assert through."""
+    lines = text.splitlines()
+    assert lines[0] == "---", "report must open with a frontmatter fence"
+    end = lines.index("---", 1)
+    fields = {}
+    for line in lines[1:end]:
+        if ": " in line:
+            key, value = line.split(": ", 1)
+            fields[key] = value
+    return fields
+
+
 class TestRollupPrecedence(unittest.TestCase):
     """D-01 precedence (failing > pending > passing) plus Pitfall 6's
     skipping/cancel bucket mapping, as pure-function assertions with no I/O."""
@@ -196,10 +216,71 @@ class TestVerifyPost(unittest.TestCase):
                     pr_status.verify_post(str(phase_dir))
                     second_text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
 
+            # generated_at is a live UTC timestamp: comparing it across two
+            # runs would fail whenever they straddle a second boundary. Every
+            # other byte must be identical -- that is what "overwrites, not
+            # appends" means.
             self.assertEqual(len(first_text), len(second_text))
             self.assertEqual(first_text.count("---"), 2)
             self.assertEqual(second_text.count("---"), 2)
-            self.assertEqual(first_text, second_text)
+            self.assertEqual(_without_timestamp(first_text), _without_timestamp(second_text))
+
+
+class TestOpenPrReport(unittest.TestCase):
+    """The report's non-status fields (`pr_number`, `open_pr_count`) and the
+    passing/pending/skipping rollups end-to-end, not just as pure-function
+    assertions -- the gate reads what `_write_report` emits, not what
+    `rollup_pr_status` returns."""
+
+    def _run(self, checks_fixture, pr_list=PR_LIST_ONE_OPEN):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        phase_dir = _write_phase_dir(Path(tmp.name))
+
+        def fake_run(argv, **kwargs):
+            if argv[:3] == ["gh", "auth", "status"]:
+                return _completed("", 0)
+            if argv[:3] == ["git", "branch", "--show-current"]:
+                return _completed("feature-x\n", 0)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(pr_list, 0)
+            if argv[:3] == ["gh", "pr", "checks"]:
+                return _completed(_fixture(checks_fixture), 0)
+            raise AssertionError(f"unexpected call: {argv}")
+
+        with mock.patch("shutil.which", return_value="/usr/bin/gh"):
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                exit_code = pr_status.verify_post(str(phase_dir))
+        self.assertEqual(exit_code, 0)
+        return _frontmatter((phase_dir / "14-PR.md").read_text(encoding="utf-8"))
+
+    def test_all_checks_pass_reports_number_and_count(self):
+        fields = self._run("checks_pass.json")
+        self.assertEqual(fields["pr_status"], "passing")
+        self.assertEqual(fields["pr_gate_ok"], "true")
+        self.assertEqual(fields["pr_number"], "42")
+        self.assertEqual(fields["open_pr_count"], "1")
+
+    def test_pending_checks_are_not_gate_ok(self):
+        fields = self._run("checks_pending.json")
+        self.assertEqual(fields["pr_status"], "pending")
+        self.assertEqual(fields["pr_gate_ok"], "false")
+
+    def test_skipping_checks_are_gate_ok(self):
+        fields = self._run("checks_skipping.json")
+        self.assertEqual(fields["pr_status"], "passing")
+        self.assertEqual(fields["pr_gate_ok"], "true")
+
+    def test_two_open_prs_record_count_and_take_first(self):
+        # D-02/RESEARCH A4: two open PRs can share one head branch (different
+        # base branches). The count must be recorded, not silently collapsed.
+        two_open = json.dumps([
+            {"number": 42, "url": "https://github.com/x/y/pull/42"},
+            {"number": 43, "url": "https://github.com/x/y/pull/43"},
+        ])
+        fields = self._run("checks_pass.json", pr_list=two_open)
+        self.assertEqual(fields["pr_number"], "42")
+        self.assertEqual(fields["open_pr_count"], "2")
 
 
 class TestFailOpen(unittest.TestCase):
