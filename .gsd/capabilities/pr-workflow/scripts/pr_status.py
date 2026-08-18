@@ -23,11 +23,11 @@ from pathlib import Path
 NOTICE_GH_ABSENT = "gh not found on PATH -- install: https://cli.github.com"
 NOTICE_GH_UNAUTH = "gh not authenticated -- run: gh auth login"
 
-# Third fail-open notice: gh_available() passed (gh present, authenticated),
-# but a live gh call after that guard raised a transient error (timeout,
-# OS-level spawn failure, or unparseable JSON). Distinct from the two guard
-# notices above -- this path is reached only once gh has already been
-# confirmed present and authenticated.
+# Third fail-open notice: `gh` is on PATH, but a live gh/git call raised a
+# transient error (timeout, OS-level spawn failure, or unparseable JSON).
+# Distinct from the two guard notices above -- neither "absent" nor
+# "unauthenticated" is a truthful description of this failure. Covers both
+# gh_available()'s own `gh auth status` call and every call after it.
 NOTICE_GH_ERROR = "gh command failed unexpectedly -- PR status unavailable this run"
 
 # PRW-03: ship:post warn-only notice for "no open PR exists for this
@@ -79,10 +79,22 @@ def gh_available():
     """PRW-04 two-tier guard: `gh` absent from PATH, then (only if present)
     a plain, non-`--json` `gh auth status` invocation (RESEARCH Pitfall 5 --
     `--json` mode always exits 0 even when unauthenticated, so it cannot be
-    used to detect the unauthenticated case)."""
+    used to detect the unauthenticated case).
+
+    Never raises. `gh auth status` is a live network call (it validates the
+    token against the API), so it can time out or fail to spawn just like
+    any later `gh` call -- and both callers invoke this guard *before* their
+    fail-open `try`, so a raise here would escape as an uncaught traceback.
+    At `execute:wave:post` that means `onError: skip` leaves the PREVIOUS
+    run's report (possibly `pr_gate_ok: true`) stale on disk, which is
+    exactly the failure T-14-01 exists to prevent. Degrade to the same
+    honest sentinel a post-guard blow-up produces instead."""
     if shutil.which("gh") is None:
         return False, NOTICE_GH_ABSENT
-    auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
+    try:
+        auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        return False, NOTICE_GH_ERROR
     if auth.returncode != 0:
         return False, NOTICE_GH_UNAUTH
     return True, None
@@ -170,12 +182,17 @@ def _write_report(out_path, phase_dir, generated_at, generated_from, pr_status,
         f"pr_number: {pr_number if pr_number is not None else 'null'}",
         f"open_pr_count: {open_pr_count}",
     ]
+    # WR-03: every free-text frontmatter value goes through json.dumps --
+    # its C-string-style escaping is valid inside a YAML double-quoted
+    # scalar and keeps live text from breaking out of the value.
+    # `generated_from` embeds the live branch name, which git allows `"` in
+    # (e.g. `feature"pwn`). `unavailable_reason` embeds `gh`/`git` stderr,
+    # which is multi-line: an unquoted newline there ends the scalar and
+    # lets the REST of the stderr land as sibling frontmatter keys --
+    # including a forged `pr_gate_ok: true` that a last-wins YAML reader
+    # would hand straight to the ship:pre gate.
     if unavailable_reason is not None:
-        lines.append(f"unavailable_reason: {unavailable_reason}")
-    # WR-03: git allows `"` in branch names, and generated_from embeds the
-    # live branch verbatim -- json.dumps' C-string-style escaping is valid
-    # inside a YAML double-quoted scalar and prevents a crafted branch name
-    # (e.g. `feature"pwn`) from terminating the quoted string early.
+        lines.append(f"unavailable_reason: {json.dumps(unavailable_reason)}")
     lines.append(f"generated_from: {json.dumps(generated_from)}")
     lines.append(f"generated_at: {generated_at}")
     lines.append("---\n")
@@ -192,9 +209,10 @@ def verify_post(phase_dir_arg):
 
     PRW-04 fail-open paths -- all print exactly one notice and still fully
     overwrite the report with `pr_status: unavailable`, `pr_gate_ok: false`:
-    `gh` absent or unauthenticated (`gh_available()` guard), or a live `gh`/
-    `git` call raising `subprocess.TimeoutExpired`/`OSError`/
-    `json.JSONDecodeError`/`GhCommandError` after that guard already passed.
+    `gh` absent or unauthenticated (`gh_available()` guard), or any live
+    `gh`/`git` call -- the guard's own `gh auth status` included -- raising
+    `subprocess.TimeoutExpired`/`OSError`/`json.JSONDecodeError`/
+    `GhCommandError`.
     An unmeasured status can never satisfy
     the ship:pre gate (T-14-01) -- this is a **deliberate divergence** from
     beads/scripts/sync.py::regenerate_beads_md (which leaves a prior report
@@ -281,6 +299,24 @@ def verify_post(phase_dir_arg):
             pr_status="unavailable", pr_gate_ok=False,
             pr_number=None, open_pr_count=0,
             unavailable_reason=f"RuntimeError: {exc}",
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # Backstop for the impossible-but-not-inexpressible: gh returning
+        # JSON that parses yet lacks `number`/`bucket` (KeyError), or any
+        # other unforeseen failure. Deliberately broad, for the same reason
+        # the two clauses above exist: under `onError: skip` an UNCAUGHT
+        # exception silently preserves the previous run's report, so "let it
+        # crash" here means "let a stale pr_gate_ok: true satisfy ship:pre".
+        # Loud (exit 1, printed) but never stale -- same trade as the
+        # RuntimeError clause.
+        print(f"pr status read failed unexpectedly: {type(exc).__name__}: {exc}")
+        _write_report(
+            out_path, phase_dir, generated_at,
+            generated_from="none (unexpected failure)",
+            pr_status="unavailable", pr_gate_ok=False,
+            pr_number=None, open_pr_count=0,
+            unavailable_reason=f"{type(exc).__name__}: {exc}",
         )
         return 1
 
