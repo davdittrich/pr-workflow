@@ -1,0 +1,10 @@
+{
+  "name": "pr-workflow",
+  "version": "0.1.0",
+  "description": "Wraps gh CLI to read PR/check status for the current branch; execute:wave:post writes a gate-readable PR.md report, ship:pre gates advisorily on it.",
+  "author": {
+    "name": "Dennis A. V. Dittrich",
+    "email": "davdittrich@gmail.com"
+  },
+  "license": "MIT"
+}

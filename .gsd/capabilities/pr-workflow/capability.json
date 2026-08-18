@@ -1,0 +1,77 @@
+{
+  "id": "pr-workflow",
+  "role": "feature",
+  "version": "0.1.0",
+  "title": "PR workflow",
+  "description": "Wraps gh CLI to read PR/check status for the current branch; execute:wave:post writes a gate-readable PR.md report, ship:pre gates advisorily on it.",
+  "tier": "full",
+  "requires": [],
+  "engines": {
+    "gsd": ">=1.6.0"
+  },
+  "runtimeCompat": {
+    "supported": [
+      "*"
+    ],
+    "unsupported": []
+  },
+  "skills": [
+    "pr-workflow-report"
+  ],
+  "agents": [],
+  "hooks": [],
+  "config": {
+    "pr-workflow.enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Master toggle for the pr-workflow capability."
+    },
+    "pr-workflow.ship_gate": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true, ship:pre advises (never blocks -- PRW-05 defers blocking to v2) on pr_gate_ok!=true in PR.md."
+    }
+  },
+  "steps": [
+    {
+      "point": "execute:wave:post",
+      "ref": {
+        "skill": "pr-workflow-report"
+      },
+      "produces": [
+        "PR.md"
+      ],
+      "consumes": [],
+      "when": "pr-workflow.enabled",
+      "onError": "skip"
+    },
+    {
+      "point": "ship:post",
+      "ref": {
+        "skill": "pr-workflow-report"
+      },
+      "produces": [],
+      "consumes": [],
+      "when": "pr-workflow.enabled",
+      "onError": "skip"
+    }
+  ],
+  "contributions": [],
+  "gates": [
+    {
+      "point": "ship:pre",
+      "check": {
+        "predicate": {
+          "kind": "artifact-frontmatter-equals",
+          "artifact": "PR.md",
+          "field": "pr_gate_ok",
+          "equals": true
+        }
+      },
+      "when": "pr-workflow.ship_gate",
+      "blocking": false,
+      "onError": "skip",
+      "description": "Advisory only (PRW-02): PR.md's derived pr_gate_ok boolean is the gate target, never the raw four-state pr_status (single-scalar equals cannot express OR -- 14-RESEARCH.md Pitfall 1)."
+    }
+  ]
+}
