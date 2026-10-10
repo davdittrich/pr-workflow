@@ -2,13 +2,10 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
-          {
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
-            "type": "command"
-          }
-        ],
-        "matcher": ""
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/capability-auto-install.sh\" pr-workflow", "timeout": 15 }
+        ]
       }
     ]
   }
