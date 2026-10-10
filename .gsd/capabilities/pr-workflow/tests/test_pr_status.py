@@ -46,19 +46,18 @@ def _fixture(name):
 
 
 _STAGE_ARGV = {
-    ("gh", "auth", "status"): "auth",
     ("gh", "pr", "list"): "list",
     ("gh", "pr", "checks"): "checks",
 }
 
 
-def _verify(phase_dir, fn="verify_post", which="/usr/bin/gh", auth="", branch="feature-x\n",
+def _verify(phase_dir, fn="verify_post", which="/usr/bin/gh", branch="feature-x\n",
             pr_list=PR_LIST_ONE_OPEN, checks=None):
     """Run pr_status.<fn>(phase_dir) against one fake gh/git. Each stage value
     is a CompletedProcess, an exception instance (raised), or a str (stdout,
     rc 0). Returns (exit_code, captured stdout, argv list of every call)."""
     stages = {
-        "auth": auth, "branch": branch, "list": pr_list,
+        "branch": branch, "list": pr_list,
         "checks": _fixture("checks_pass.json") if checks is None else checks,
     }
     calls = []
@@ -384,27 +383,18 @@ class TestFailOpen(unittest.TestCase):
             self.assertIn("unavailable_reason", text)
 
     def test_gh_unauthenticated_fail_open(self):
+        # kilo.15: no separate `gh auth status` network call; unauthenticated
+        # surfaces as a failing `gh pr list` and degrades to the sentinel.
         with tempfile.TemporaryDirectory() as tmp:
             phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 1, stderr="not logged in")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
+            failing = _completed("", 1, stderr="To get started with GitHub CLI, please run: gh auth login")
+            exit_code, output, calls = _verify(phase_dir, pr_list=failing)
             self.assertEqual(exit_code, 0)
-            output = captured.getvalue()
-            self.assertEqual(output.count(pr_status.NOTICE_GH_UNAUTH), 1)
-            self.assertNotIn(pr_status.NOTICE_GH_ABSENT, output)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertIn("pr_gate_ok: false", text)
+            self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+            fields = _report(phase_dir)
+            self.assertEqual(fields["pr_status"], "unavailable")
+            self.assertEqual(fields["pr_gate_ok"], "false")
+            self.assertNotIn(["gh", "auth", "status"], [c[:3] for c in calls])
 
     def test_stale_passing_status_replaced_by_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -607,35 +597,6 @@ class TestFailOpen(unittest.TestCase):
             self.assertIn("boom", fields["unavailable_reason"])
             self.assertNotIn("\n", fields["unavailable_reason"])
 
-    def test_gh_auth_status_blowup_fails_open_and_overwrites_stale(self):
-        # gh_available() runs BEFORE verify_post's fail-open try block, and
-        # `gh auth status` is a live network call. If it could raise, the
-        # traceback would escape, onError:skip would swallow it, and the
-        # PREVIOUS run's pr_gate_ok: true would stay on disk unmeasured.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            report_path = phase_dir / "14-PR.md"
-            report_path.write_text(
-                "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n", encoding="utf-8"
-            )
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    raise subprocess.TimeoutExpired(cmd=argv, timeout=15)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ERROR), 1)
-            fields = _frontmatter(report_path.read_text(encoding="utf-8"))
-            self.assertEqual(fields["pr_status"], "unavailable")
-            self.assertEqual(fields["pr_gate_ok"], "false")
-
     def test_malformed_pr_json_writes_sentinel(self):
         # gh JSON that parses but lacks `number` raises KeyError -- outside
         # the fail-open tuple and not a RuntimeError. Uncaught, it would skip
@@ -667,17 +628,6 @@ class TestFailOpen(unittest.TestCase):
             self.assertEqual(fields["pr_status"], "unavailable")
             self.assertEqual(fields["pr_gate_ok"], "false")
             self.assertIn("KeyError", fields["unavailable_reason"])
-
-
-class TestNoticeDistinctness(unittest.TestCase):
-    """D-04: the user must be able to tell which fix applies -- the two
-    notices must be distinct strings and neither a substring of the other."""
-
-    def test_notices_are_distinct_and_not_substrings(self):
-        a, b = pr_status.NOTICE_GH_ABSENT, pr_status.NOTICE_GH_UNAUTH
-        self.assertNotEqual(a, b)
-        self.assertNotIn(a, b)
-        self.assertNotIn(b, a)
 
 
 class TestShipPostNotice(unittest.TestCase):
@@ -783,28 +733,6 @@ class TestShipPostNotice(unittest.TestCase):
             self.assertEqual(output.count(pr_status.NOTICE_GH_ABSENT), 1)
             self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
 
-    def test_gh_auth_status_blowup_fails_open(self):
-        # Same guard, other caller: gh_available() is called outside this
-        # function's try block too, so it must not raise here either.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    raise OSError("gh vanished between which() and run()")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.ship_post_notice(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            output = captured.getvalue()
-            self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
-            self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
-
     def test_never_reads_pr_md(self):
         with tempfile.TemporaryDirectory() as tmp:
             phase_dir = _write_phase_dir(Path(tmp))
@@ -834,10 +762,9 @@ class TestNonUtf8Output(unittest.TestCase):
     def _run_with_fake_bins(self, **stages):
         """Run verify_post against real fake `gh`/`git` executables on PATH so
         the real subprocess decode path is exercised. stages maps a stage
-        (auth, branch, list, checks) to shell that emits non-UTF8 bytes."""
+        (branch, list, checks) to shell that emits non-UTF8 bytes."""
         scripts = {
             "gh": 'case "$1 $2" in\n'
-                  f'  "auth status") {stages.get("auth", "exit 0")} ;;\n'
                   f'  "pr list") {stages.get("list", "echo [{{\\\"number\\\":1}}]")} ;;\n'
                   f'  "pr checks") {stages.get("checks", "echo [{{\\\"bucket\\\":\\\"pass\\\"}}]")} ;;\n'
                   "esac\n",
@@ -861,7 +788,7 @@ class TestNonUtf8Output(unittest.TestCase):
         bad_err = "printf '\\377' >&2; exit 1"
         bad_out = "printf '\\377'"
         for stage, body in {
-            "auth": bad_err, "branch": bad_err, "list": bad_err, "list-stdout": bad_out,
+            "branch": bad_err, "list": bad_err, "list-stdout": bad_out,
             "checks": bad_err,
         }.items():
             with self.subTest(stage=stage):

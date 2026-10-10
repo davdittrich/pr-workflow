@@ -17,18 +17,17 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# D-04: two distinct, differently-worded notices so the user can tell which
+# D-04: a differently-worded notice per failure so the user can tell which
 # fix applies. Consumed by gh_available(); final wording/fail-open branch
 # expansion (ship:post no-open-PR notice, etc.) is plan 14-02 scope -- kept
 # as two distinct constants here so that scope stays separable.
 NOTICE_GH_ABSENT = "gh not found on PATH -- install: https://cli.github.com"
-NOTICE_GH_UNAUTH = "gh not authenticated -- run: gh auth login"
 
 # Third fail-open notice: `gh` is on PATH, but a live gh/git call raised a
 # transient error (timeout, OS-level spawn failure, or unparseable JSON).
-# Distinct from the two guard notices above -- neither "absent" nor
-# "unauthenticated" is a truthful description of this failure. Covers both
-# gh_available()'s own `gh auth status` call and every call after it.
+# Distinct from the absent notice above -- "absent" is not a truthful
+# description of this failure. Also what an unauthenticated `gh pr list`
+# degrades to.
 NOTICE_GH_ERROR = "gh command failed unexpectedly -- PR status unavailable this run"
 
 # PRW-03: ship:post warn-only notice for "no open PR exists for this
@@ -77,27 +76,12 @@ def confined(root, *parts):
 
 
 def gh_available():
-    """PRW-04 two-tier guard: `gh` absent from PATH, then (only if present)
-    a plain, non-`--json` `gh auth status` invocation (RESEARCH Pitfall 5 --
-    `--json` mode always exits 0 even when unauthenticated, so it cannot be
-    used to detect the unauthenticated case).
-
-    Never raises. `gh auth status` is a live network call (it validates the
-    token against the API), so it can time out or fail to spawn just like
-    any later `gh` call -- and both callers invoke this guard *before* their
-    fail-open `try`, so a raise here would escape as an uncaught traceback.
-    At `execute:wave:post` that means `onError: skip` leaves the PREVIOUS
-    run's report (possibly `pr_gate_ok: true`) stale on disk, which is
-    exactly the failure T-14-01 exists to prevent. Degrade to the same
-    honest sentinel a post-guard blow-up produces instead."""
+    """PRW-04 guard: `gh` absent from PATH. Unauthenticated needs no probe of
+    its own -- `gh pr list` fails when unauthenticated and the callers'
+    fail-open path turns that into the same unavailable sentinel (and it
+    saves a `gh auth status` network round-trip). Never raises."""
     if shutil.which("gh") is None:
         return False, NOTICE_GH_ABSENT
-    try:
-        auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, errors="replace", timeout=15)
-    except (subprocess.TimeoutExpired, OSError):
-        return False, NOTICE_GH_ERROR
-    if auth.returncode != 0:
-        return False, NOTICE_GH_UNAUTH
     return True, None
 
 
@@ -224,8 +208,8 @@ def verify_post(phase_dir_arg):
 
     PRW-04 fail-open paths -- all print exactly one notice and still fully
     overwrite the report with `pr_status: unavailable`, `pr_gate_ok: false`:
-    `gh` absent or unauthenticated (`gh_available()` guard), or any live
-    `gh`/`git` call -- the guard's own `gh auth status` included -- raising
+    `gh` absent (`gh_available()` guard), or any live `gh`/`git` call --
+    unauthenticated included, as a failing `gh pr list` -- raising
     `subprocess.TimeoutExpired`/`OSError`/`json.JSONDecodeError`/
     `GhCommandError`.
     An unmeasured status can never satisfy
@@ -363,8 +347,7 @@ def ship_post_notice(phase_dir_arg):
     no file (never `PR.md`, which could be stale for a PR merged or closed
     since the last `execute:wave:post` run -- RESEARCH Pitfall 2) and
     mutates no git/GitHub state. Returns 0 on every path; issues no `gh`
-    subcommand beyond `gh_available()`'s `auth status` and `find_open_pr`'s
-    `pr list`.
+    subcommand beyond `find_open_pr`'s `pr list`.
 
     CR-01: the two live calls are wrapped in the same fail-open except tuple
     as `verify_post()` -- a `gh pr list`/`git branch` blow-up after the
