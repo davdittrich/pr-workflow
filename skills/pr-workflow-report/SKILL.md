@@ -22,18 +22,13 @@ Phase directory: `$ARGUMENTS` when given, else the `PHASE_DIR` of the phase the 
 workflow is running. When neither exists, print `pr-workflow: phase directory unknown` and stop.
 
 ```bash
-PR_PY=""
-for candidate in \
-  "${CLAUDE_PROJECT_DIR:-}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
-  "${GSD_HOME:-$HOME}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
-  "${CLAUDE_PLUGIN_ROOT:-}/scripts/pr_status.py"
-do
-  if [ -f "$candidate" ]; then PR_PY="$candidate"; break; fi
-done
-if [ -z "$PR_PY" ]; then
-  echo "pr-workflow: pr_status.py not found in project, global, or plugin roots" >&2
-  exit 1
+# Trust order: global manifest, plugin root, then the project copy (a repo can plant it).
+G="${GSD_HOME:-$HOME}/.gsd/capabilities/pr-workflow"
+if [ -f "$G/capability.json" ]; then PR_PY="$G/scripts/pr_status.py"
+elif [ -f "${CLAUDE_PLUGIN_ROOT:-}/scripts/pr_status.py" ]; then PR_PY="$CLAUDE_PLUGIN_ROOT/scripts/pr_status.py"
+else PR_PY="${CLAUDE_PROJECT_DIR:-}/.gsd/capabilities/pr-workflow/scripts/pr_status.py"
 fi
+[ -f "$PR_PY" ] || { echo "pr-workflow: pr_status.py not found in project, global, or plugin roots" >&2; exit 1; }
 python3 -I "$PR_PY" "$SUB" <phase directory>
 ```
 

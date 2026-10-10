@@ -54,3 +54,4 @@ jobs:
           mkdir -p "$HOME"
           bash tests/test-capability-auto-install.sh
           bash tests/test-versions.sh
+          bash tests/test-skill-resolution.sh
