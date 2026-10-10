@@ -48,6 +48,7 @@ OLD_HASH=""
 NEW_HASH="$(bundle_hash)"
 
 # Fast path: unchanged bundle exits silently, never spawns node.
+# shortcut: the plugin is the source of truth, so a changed bundle always reinstalls; no removal tombstone and no downgrade guard. Upgrade when gsd exposes an installed-version ledger entry to compare against.
 [ "$NEW_HASH" = "$OLD_HASH" ] && exit 0
 
 # Never resolve gsd-tools from the cwd's repo: a cloned repo's
