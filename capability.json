@@ -3,7 +3,7 @@
   "role": "feature",
   "version": "0.1.1",
   "title": "PR workflow",
-  "description": "Wraps gh CLI to read PR/check status for the current branch; execute:wave:post writes a gate-readable PR.md report, ship:pre gates advisorily on it.",
+  "description": "Reports PR/check status via gh into PR.md; advisory ship:pre gate on it.",
   "tier": "full",
   "requires": [],
   "engines": {
@@ -29,7 +29,7 @@
     "pr-workflow.ship_gate": {
       "type": "boolean",
       "default": true,
-      "description": "When true, ship:pre advises (never blocks -- PRW-05 defers blocking to v2) on pr_gate_ok!=true in PR.md."
+      "description": "Register the advisory ship:pre gate on PR.md."
     }
   },
   "steps": [
@@ -71,7 +71,7 @@
       "when": "pr-workflow.ship_gate",
       "blocking": false,
       "onError": "skip",
-      "description": "Advisory only (PRW-02): PR.md's derived pr_gate_ok boolean is the gate target, never the raw four-state pr_status (single-scalar equals cannot express OR -- 14-RESEARCH.md Pitfall 1)."
+      "description": "Advisory: shows a message and ship continues unless PR.md has pr_gate_ok true."
     }
   ]
 }
