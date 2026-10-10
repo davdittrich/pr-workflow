@@ -161,150 +161,79 @@ class TestCurrentBranch(unittest.TestCase):
                 pr_status.current_branch(Path("."))
 
 
+GENERATED_AT_RE = r"(?m)^generated_at: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$"
+STALE_PASS = "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n"
+
+
 class TestVerifyPost(unittest.TestCase):
-    """verify_post() end-to-end against a mocked subprocess.run -- one
-    fake_run dispatcher per test, branching on the argv prefix so each test
-    only asserts the calls its own scenario actually needs."""
+    """verify_post() end-to-end against one faked gh/git (see _verify)."""
+
+    def _run(self, **stages):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        phase_dir = _write_phase_dir(Path(tmp.name))
+        exit_code, output, _ = _verify(phase_dir, **stages)
+        return phase_dir, exit_code, output
 
     def test_no_open_pr_writes_none_and_gate_ok(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(_fixture("pr_list_empty.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            report_path = phase_dir / "14-PR.md"
-            self.assertTrue(report_path.exists())
-            text = report_path.read_text(encoding="utf-8")
-            self.assertIn("pr_status", text)
-            self.assertIn("pr_gate_ok", text)
-            self.assertIn("generated_at", text)
-            self.assertIn("generated_from", text)
-            self.assertIn("pr_status: none", text)
-            self.assertIn("pr_gate_ok: true", text)
+        phase_dir, exit_code, _ = self._run(pr_list=_fixture("pr_list_empty.json"))
+        self.assertEqual(exit_code, 0)
+        text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
+        fields = _frontmatter(text)
+        self.assertEqual(fields["pr_status"], "none")
+        self.assertEqual(fields["pr_gate_ok"], "true")
+        self.assertIn("generated_from", fields)
+        self.assertRegex(text, GENERATED_AT_RE)
 
     def test_open_pr_failing_checks_writes_failing_and_gate_not_ok(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-x\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(PR_LIST_ONE_OPEN, 0)
-                if argv[:3] == ["gh", "pr", "checks"]:
-                    return _completed(_fixture("checks_fail.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: failing", text)
-            self.assertIn("pr_gate_ok: false", text)
+        phase_dir, exit_code, _ = self._run(checks=_fixture("checks_fail.json"))
+        self.assertEqual(exit_code, 0)
+        fields = _report(phase_dir)
+        self.assertEqual(fields["pr_status"], "failing")
+        self.assertEqual(fields["pr_gate_ok"], "false")
 
     def test_branch_with_embedded_quote_does_not_break_frontmatter(self):
-        # WR-03: git allows `"` in ref names; generated_from must escape it
-        # rather than terminating the quoted YAML scalar early.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed('feature"pwn\n', 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(_fixture("pr_list_empty.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            line = next(l for l in text.splitlines() if l.startswith("generated_from:"))
-            self.assertEqual(
-                line,
-                'generated_from: "gh pr list --head=feature\\"pwn --state open --limit 100 --json number,url,isCrossRepository"',
-            )
-            # frontmatter block boundaries stay intact -- no unquoted
-            # trailing text leaked onto the generated_from line.
-            self.assertEqual(text.count("---"), 2)
+        # WR-03: git allows `"` in branch names; generated_from must escape it
+        # instead of terminating the quoted YAML scalar early.
+        phase_dir, exit_code, _ = self._run(
+            branch='feature"pwn\n', pr_list=_fixture("pr_list_empty.json"))
+        self.assertEqual(exit_code, 0)
+        text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if l.startswith("generated_from:"))
+        self.assertEqual(
+            line,
+            'generated_from: "gh pr list --head=feature\\"pwn --state open --limit 100'
+            ' --json number,url,isCrossRepository"',
+        )
+        # frontmatter block boundaries intact -- no unquoted newline leaked
+        self.assertEqual(text.count("---"), 2)
 
     def test_rerun_overwrites_not_appends(self):
         with tempfile.TemporaryDirectory() as tmp:
             phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(_fixture("pr_list_empty.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    pr_status.verify_post(str(phase_dir))
-                    first_text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-                    pr_status.verify_post(str(phase_dir))
-                    second_text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-
-            # generated_at is a live UTC timestamp: comparing it across two
-            # runs would fail whenever they straddle a second boundary. Every
-            # other byte must be identical -- that is what "overwrites, not
-            # appends" means.
-            self.assertEqual(len(first_text), len(second_text))
-            self.assertEqual(first_text.count("---"), 2)
-            self.assertEqual(second_text.count("---"), 2)
-            self.assertEqual(_without_timestamp(first_text), _without_timestamp(second_text))
+            texts = []
+            for _ in range(2):
+                _verify(phase_dir, pr_list=_fixture("pr_list_empty.json"))
+                texts.append((phase_dir / "14-PR.md").read_text(encoding="utf-8"))
+            # generated_at is live: comparing it across runs would fail
+            # whenever they straddle a second boundary. Every other byte must
+            # be identical -- that is what "overwrites, not appends" means.
+            self.assertEqual([t.count("---") for t in texts], [2, 2])
+            self.assertEqual(_without_timestamp(texts[0]), _without_timestamp(texts[1]))
 
 
 class TestOpenPrReport(unittest.TestCase):
     """The report's non-status fields (`pr_number`, `open_pr_count`) and the
-    passing/pending/skipping rollups end-to-end, not just as pure-function
-    assertions -- the gate reads what `_write_report` emits, not what
-    `rollup_pr_status` returns."""
+    passing/pending/skipping rollups end-to-end -- the gate reads what
+    `_write_report` emits, not what `rollup_pr_status` returns."""
 
     def _run(self, checks_fixture, pr_list=PR_LIST_ONE_OPEN):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         phase_dir = _write_phase_dir(Path(tmp.name))
-
-        def fake_run(argv, **kwargs):
-            if argv[:3] == ["gh", "auth", "status"]:
-                return _completed("", 0)
-            if argv[0] == "git":
-                return _completed("feature-x\n", 0)
-            if argv[:3] == ["gh", "pr", "list"]:
-                return _completed(pr_list, 0)
-            if argv[:3] == ["gh", "pr", "checks"]:
-                return _completed(_fixture(checks_fixture), 0)
-            raise AssertionError(f"unexpected call: {argv}")
-
-        with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-            with mock.patch("subprocess.run", side_effect=fake_run):
-                exit_code = pr_status.verify_post(str(phase_dir))
+        exit_code, _, _ = _verify(phase_dir, pr_list=pr_list, checks=_fixture(checks_fixture))
         self.assertEqual(exit_code, 0)
-        return _frontmatter((phase_dir / "14-PR.md").read_text(encoding="utf-8"))
+        return _report(phase_dir)
 
     def test_all_checks_pass_reports_number_and_count(self):
         fields = self._run("checks_pass.json")
@@ -345,13 +274,8 @@ class TestOpenPrReport(unittest.TestCase):
             self.assertEqual(_frontmatter(text)["pr_gate_ok"], "false")
 
     def test_two_open_prs_record_count_and_take_first(self):
-        # D-02/RESEARCH A4: two open PRs can share one head branch (different
-        # base branches). The count must be recorded, not silently collapsed.
-        two_open = json.dumps([
-            _pr(42),
-            _pr(43),
-        ])
-        fields = self._run("checks_pass.json", pr_list=two_open)
+        # D-02/RESEARCH A4: two open PRs on one head must not collapse silently.
+        fields = self._run("checks_pass.json", pr_list=json.dumps([_pr(42), _pr(43)]))
         self.assertEqual(fields["pr_number"], "42")
         self.assertEqual(fields["open_pr_count"], "2")
 
@@ -362,272 +286,92 @@ class TestFailOpen(unittest.TestCase):
     sentinel report that fully overwrites any prior content -- mirrors
     markdown-linting's TestFailOpen shape (test_lint.py)."""
 
-    def test_gh_absent_fail_open(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-            with mock.patch("shutil.which", return_value=None):
-                with mock.patch(
-                    "subprocess.run",
-                    side_effect=AssertionError("gh must not be invoked when absent from PATH"),
-                ) as mock_run:
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
+    def _run(self, stale=False, **kwargs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        phase_dir = _write_phase_dir(Path(tmp.name))
+        if stale:
+            (phase_dir / "14-PR.md").write_text(STALE_PASS, encoding="utf-8")
+        exit_code, output, calls = _verify(phase_dir, **kwargs)
+        self.assertEqual(exit_code, 0)
+        return _report(phase_dir), output, calls
 
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ABSENT), 1)
-            self.assertEqual(mock_run.call_count, 0)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertIn("pr_gate_ok: false", text)
-            self.assertIn("unavailable_reason", text)
+    def assertSentinel(self, fields):
+        self.assertEqual(fields["pr_status"], "unavailable")
+        self.assertEqual(fields["pr_gate_ok"], "false")
+
+    def test_gh_absent_fail_open(self):
+        fields, output, calls = self._run(which=None)
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ABSENT), 1)
+        self.assertEqual(calls, [])
+        self.assertSentinel(fields)
+        self.assertNotEqual(fields["unavailable_reason"], "")
 
     def test_gh_unauthenticated_fail_open(self):
         # kilo.15: no separate `gh auth status` network call; unauthenticated
         # surfaces as a failing `gh pr list` and degrades to the sentinel.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            failing = _completed("", 1, stderr="To get started with GitHub CLI, please run: gh auth login")
-            exit_code, output, calls = _verify(phase_dir, pr_list=failing)
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
-            fields = _report(phase_dir)
-            self.assertEqual(fields["pr_status"], "unavailable")
-            self.assertEqual(fields["pr_gate_ok"], "false")
-            self.assertNotIn(["gh", "auth", "status"], [c[:3] for c in calls])
+        failing = _completed("", 1, stderr="To get started with GitHub CLI, please run: gh auth login")
+        fields, output, calls = self._run(pr_list=failing)
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+        self.assertSentinel(fields)
+        self.assertNotIn(["gh", "auth", "status"], [c[:3] for c in calls])
 
     def test_stale_passing_status_replaced_by_sentinel(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            report_path = phase_dir / "14-PR.md"
-            report_path.write_text(
-                "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n", encoding="utf-8"
-            )
-            with mock.patch("shutil.which", return_value=None):
-                with mock.patch(
-                    "subprocess.run",
-                    side_effect=AssertionError("gh must not be invoked when absent from PATH"),
-                ):
-                    pr_status.verify_post(str(phase_dir))
-
-            text = report_path.read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertNotIn("pr_status: passing", text)
-            self.assertNotIn("pr_gate_ok: true", text)
+        fields, _, _ = self._run(stale=True, which=None)
+        self.assertSentinel(fields)
 
     def test_gh_pr_list_timeout_fail_open(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ERROR), 1)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertIn("pr_gate_ok: false", text)
+        fields, output, _ = self._run(pr_list=subprocess.TimeoutExpired(cmd="gh", timeout=30))
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+        self.assertSentinel(fields)
 
     def test_gh_pr_list_nonzero_exit_fail_open(self):
-        # WR-01: find_open_pr()'s GhCommandError on any gh pr list non-zero
-        # exit (not just a TimeoutExpired) must also fail open, unlike
-        # check_buckets()'s deliberately-uncaught plain RuntimeError.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed("", 1, stderr="HTTP 403: rate limited")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ERROR), 1)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertIn("pr_gate_ok: false", text)
+        # WR-01: a GhCommandError (non-zero exit, not a TimeoutExpired) must
+        # fail open (exit 0), never as the `gh pr checks` RuntimeError clause
+        # -- two different failures must not collapse into one behavior.
+        fields, output, _ = self._run(pr_list=_completed("", 1, stderr="HTTP 403: rate limited"))
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+        self.assertNotIn("gh pr checks failed", output)
+        self.assertSentinel(fields)
 
     def test_checks_zero_checks_stderr_is_passing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-x\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(PR_LIST_ONE_OPEN, 0)
-                if argv[:3] == ["gh", "pr", "checks"]:
-                    return _completed("", 1, stderr="no checks reported on the 'feature-x' branch")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            self.assertIn("pr_status: passing", text)
-            self.assertIn("pr_gate_ok: true", text)
+        fields, _, _ = self._run(
+            checks=_completed("", 1, stderr="no checks reported on 'feature-x' branch"))
+        self.assertEqual(fields["pr_status"], "passing")
+        self.assertEqual(fields["pr_gate_ok"], "true")
 
     def test_checks_unrelated_stderr_writes_sentinel(self):
-        # check_buckets() still raises plain RuntimeError for a genuine
-        # gh pr checks failure -- but verify_post now catches it rather
-        # than letting it propagate uncaught. Under this dispatch point's
-        # onError:skip contract, an uncaught exception would skip
-        # regenerating PR.md entirely, leaving a stale prior-run status
-        # (e.g. pr_gate_ok: true) sitting there, silently satisfying
-        # ship:pre on unmeasured data. Loud (exit 1) but never stale.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            report_path = phase_dir / "14-PR.md"
-            report_path.write_text(
-                "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n", encoding="utf-8"
-            )
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-x\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(PR_LIST_ONE_OPEN, 0)
-                if argv[:3] == ["gh", "pr", "checks"]:
-                    return _completed("", 1, stderr="thread panicked at checks.go:1:1")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            captured = io.StringIO()
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertIn("gh pr checks failed", captured.getvalue())
-            text = report_path.read_text(encoding="utf-8")
-            self.assertIn("pr_status: unavailable", text)
-            self.assertIn("pr_gate_ok: false", text)
-            self.assertIn('unavailable_reason: "RuntimeError', text)
-            self.assertNotIn("pr_status: passing", text)
-            self.assertNotIn("pr_gate_ok: true", text)
-
-    def test_gh_command_error_still_fails_open_not_caught_by_runtime_error_clause(self):
-        # GhCommandError IS-A RuntimeError. It must stay routed through the
-        # fail-open tuple's except clause (exit 0), never the bare
-        # `except RuntimeError` meant only for check_buckets()'s genuine
-        # tool failure -- the two must not collapse into one behavior.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed("", 1, stderr="HTTP 403: rate limited")
-                raise AssertionError(f"unexpected call: {argv}")
-
-            captured = io.StringIO()
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue().count(pr_status.NOTICE_GH_ERROR), 1)
-            self.assertNotIn("gh pr checks failed", captured.getvalue())
-
+        # check_buckets() raises plain RuntimeError for a genuine gh pr
+        # checks failure; verify_post must catch it, since under onError:skip
+        # an uncaught exception would leave the prior (possibly
+        # pr_gate_ok: true) report in place. Loud but never stale.
+        fields, output, _ = self._run(
+            stale=True, checks=_completed("", 1, stderr="HTTP 500 from checks.go:1:1"))
+        self.assertIn("gh pr checks failed", output)
+        self.assertSentinel(fields)
+        self.assertIn('RuntimeError', fields["unavailable_reason"])
 
     def test_gh_stderr_cannot_forge_frontmatter_keys(self):
-        # WR-03, second injection sink: unavailable_reason embeds gh stderr
-        # verbatim, and stderr is multi-line. Unquoted, everything after the
-        # first newline lands as sibling frontmatter keys -- so a stderr line
-        # reading `pr_gate_ok: true` would be handed to the ship:pre gate by
-        # a last-wins YAML reader, on a run that measured nothing.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(
-                        "", 1, stderr="boom\npr_gate_ok: true\npr_status: passing\n"
-                    )
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
-            fields = _frontmatter(text)
-            self.assertEqual(fields["pr_gate_ok"], "false")
-            self.assertEqual(fields["pr_status"], "unavailable")
-            self.assertEqual(text.count("---"), 2)
-            # the stderr text is still reported, just as one escaped scalar
-            self.assertIn("boom", fields["unavailable_reason"])
-            self.assertNotIn("\n", fields["unavailable_reason"])
+        # WR-03, second injection sink: unavailable_reason embeds multi-line
+        # gh stderr. Unquoted, everything after the first newline lands as
+        # sibling frontmatter keys -- a stderr line reading `pr_gate_ok: true`
+        # would reach the ship:pre gate via a last-wins YAML reader.
+        evil = _completed("", 1, stderr="boom\npr_gate_ok: true\npr_status: passing\n")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        phase_dir = _write_phase_dir(Path(tmp.name))
+        _verify(phase_dir, pr_list=evil)
+        text = (phase_dir / "14-PR.md").read_text(encoding="utf-8")
+        self.assertSentinel(_frontmatter(text))
+        self.assertEqual(text.count("---"), 2)
+        self.assertIn("boom", _frontmatter(text)["unavailable_reason"])
 
     def test_malformed_pr_json_writes_sentinel(self):
-        # gh JSON that parses but lacks `number` raises KeyError -- outside
-        # the fail-open tuple and not a RuntimeError. Uncaught, it would skip
-        # the regeneration and leave the stale report. Loud but never stale.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            report_path = phase_dir / "14-PR.md"
-            report_path.write_text(
-                "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n", encoding="utf-8"
-            )
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(json.dumps([{"url": "https://example.invalid/1"}]), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.verify_post(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            fields = _frontmatter(report_path.read_text(encoding="utf-8"))
-            self.assertEqual(fields["pr_status"], "unavailable")
-            self.assertEqual(fields["pr_gate_ok"], "false")
-            self.assertIn("KeyError", fields["unavailable_reason"])
+        # gh JSON that parses but lacks `number` raises KeyError, outside the
+        # fail-open tuple; the outer backstop must still write the sentinel.
+        fields, _, _ = self._run(stale=True, pr_list=json.dumps([{"url": "https://example.invalid/1", "isCrossRepository": False}]))
+        self.assertSentinel(fields)
+        self.assertIn("KeyError", fields["unavailable_reason"])
 
 
 class TestShipPostNotice(unittest.TestCase):
@@ -635,124 +379,54 @@ class TestShipPostNotice(unittest.TestCase):
     current branch. Writes no file, mutates no git/GitHub state, and never
     reads `PR.md` -- the probe is always live (RESEARCH Pitfall 2)."""
 
+    def _run(self, **kwargs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        phase_dir = _write_phase_dir(Path(tmp.name))
+        exit_code, output, calls = _verify(phase_dir, fn="ship_post_notice", **kwargs)
+        self.assertEqual(exit_code, 0)
+        return output, calls
+
     def test_no_open_pr_prints_one_notice_naming_branch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-            calls = []
-
-            def fake_run(argv, **kwargs):
-                calls.append(argv)
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-y\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(_fixture("pr_list_empty.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.ship_post_notice(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            output = captured.getvalue()
-            lines = [line for line in output.splitlines() if line.strip()]
-            self.assertEqual(len(lines), 1)
-            self.assertIn(pr_status.NOTICE_NO_OPEN_PR, output)
-            self.assertIn("feature-y", output)
-            for argv in calls:
-                for forbidden in ("create", "merge", "comment", "edit", "review"):
-                    self.assertNotIn(forbidden, argv)
+        output, calls = self._run(branch="feature-y\n", pr_list=_fixture("pr_list_empty.json"))
+        lines = [line for line in output.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(pr_status.NOTICE_NO_OPEN_PR, output)
+        self.assertIn("feature-y", output)
+        for argv in calls:
+            for forbidden in ("create", "merge", "comment", "edit", "review"):
+                self.assertNotIn(forbidden, argv)
 
     def test_open_pr_prints_nothing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-y\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(PR_LIST_ONE_OPEN, 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.ship_post_notice(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(captured.getvalue(), "")
+        output, _ = self._run(branch="feature-y\n")
+        self.assertEqual(output, "")
 
     def test_gh_pr_list_failure_fail_open(self):
-        # CR-01: a gh pr list blow-up after gh_available() already passed
-        # must fail open (print NOTICE_GH_ERROR, return 0), not crash with
-        # an uncaught RuntimeError/GhCommandError -- mirrors
-        # TestFailOpen::test_gh_pr_list_timeout_fail_open.
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("feature-y\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.ship_post_notice(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            output = captured.getvalue()
-            self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
-            self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
+        # CR-01: a gh blow-up after the guard must print NOTICE_GH_ERROR and
+        # exit 0, not crash ship:post (cf. TestFailOpen timeout test).
+        output, _ = self._run(
+            branch="feature-y\n", pr_list=subprocess.TimeoutExpired(cmd="gh", timeout=30))
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+        self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
 
     def test_gh_absent_prints_prw04_notice_not_no_pr_notice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            phase_dir = _write_phase_dir(Path(tmp))
-            captured = io.StringIO()
-            with mock.patch("shutil.which", return_value=None):
-                with mock.patch(
-                    "subprocess.run",
-                    side_effect=AssertionError("gh must not be invoked when absent from PATH"),
-                ):
-                    with mock.patch("sys.stdout", captured):
-                        exit_code = pr_status.ship_post_notice(str(phase_dir))
-
-            self.assertEqual(exit_code, 0)
-            output = captured.getvalue()
-            self.assertEqual(output.count(pr_status.NOTICE_GH_ABSENT), 1)
-            self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
+        output, calls = self._run(which=None)
+        self.assertEqual(output.count(pr_status.NOTICE_GH_ABSENT), 1)
+        self.assertNotIn(pr_status.NOTICE_NO_OPEN_PR, output)
+        self.assertEqual(calls, [])
 
     def test_never_reads_pr_md(self):
+        # A stale PR.md claiming an open PR must not influence the notice:
+        # the probe is live, and the file is left untouched.
         with tempfile.TemporaryDirectory() as tmp:
             phase_dir = _write_phase_dir(Path(tmp))
-            self.assertFalse((phase_dir / "14-PR.md").exists())
-
-            def fake_run(argv, **kwargs):
-                if argv[:3] == ["gh", "auth", "status"]:
-                    return _completed("", 0)
-                if argv[0] == "git":
-                    return _completed("main\n", 0)
-                if argv[:3] == ["gh", "pr", "list"]:
-                    return _completed(_fixture("pr_list_empty.json"), 0)
-                raise AssertionError(f"unexpected call: {argv}")
-
-            with mock.patch("shutil.which", return_value="/usr/bin/gh"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    exit_code = pr_status.ship_post_notice(str(phase_dir))
-
+            report = phase_dir / "14-PR.md"
+            report.write_text(STALE_PASS + "pr_number: 42\n", encoding="utf-8")
+            exit_code, output, _ = _verify(
+                phase_dir, fn="ship_post_notice", pr_list=_fixture("pr_list_empty.json"))
             self.assertEqual(exit_code, 0)
-            self.assertFalse((phase_dir / "14-PR.md").exists())
+            self.assertIn(pr_status.NOTICE_NO_OPEN_PR, output)
+            self.assertEqual(report.read_text(encoding="utf-8"), STALE_PASS + "pr_number: 42\n")
 
 
 class TestNonUtf8Output(unittest.TestCase):
@@ -796,9 +470,8 @@ class TestNonUtf8Output(unittest.TestCase):
                 fields = self._run_with_fake_bins(**{key: body})
                 self.assertEqual(fields["pr_status"], "unavailable")
                 self.assertEqual(fields["pr_gate_ok"], "false")
-
-
-STALE_PASS = "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n"
+                # decoded with errors=replace, not rescued by the backstop
+                self.assertNotIn("UnicodeDecodeError", fields.get("unavailable_reason", ""))
 
 
 class TestFindOpenPr(unittest.TestCase):
