@@ -178,7 +178,7 @@ def _write_report(out_path, phase_dir, generated_at, generated_from, pr_status,
     status in place (T-14-01)."""
     lines = [
         "---",
-        f"phase: {phase_dir.name}",
+        f"phase: {json.dumps(phase_dir.name)}",
         f"pr_status: {pr_status}",
         f"pr_gate_ok: {'true' if pr_gate_ok else 'false'}",
         f"pr_number: {pr_number if pr_number is not None else 'null'}",

@@ -331,6 +331,17 @@ class TestOpenPrReport(unittest.TestCase):
                     self.assertEqual(fields["pr_status"], "unavailable")
                     self.assertEqual(fields["pr_gate_ok"], "false")
 
+    def test_phase_dir_name_cannot_forge_frontmatter_keys(self):
+        # kilo.7: `phase:` embedded the directory name unquoted, so a newline
+        # in it planted a key ahead of the real pr_gate_ok.
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp), "02-a\npr_gate_ok: true")
+            _verify(phase_dir, checks=_fixture("checks_fail.json"))
+            text = (phase_dir / "02-PR.md").read_text(encoding="utf-8")
+            frontmatter = text.split("---\n")[1]
+            self.assertEqual([l for l in frontmatter.splitlines() if l.startswith("pr_gate_ok:")], ["pr_gate_ok: false"])
+            self.assertEqual(_frontmatter(text)["pr_gate_ok"], "false")
+
     def test_two_open_prs_record_count_and_take_first(self):
         # D-02/RESEARCH A4: two open PRs can share one head branch (different
         # base branches). The count must be recorded, not silently collapsed.
