@@ -499,7 +499,7 @@ class TestFailOpen(unittest.TestCase):
             self.assertIn("pr_status: passing", text)
             self.assertIn("pr_gate_ok: true", text)
 
-    def test_checks_unrelated_stderr_writes_sentinel_and_returns_nonzero(self):
+    def test_checks_unrelated_stderr_writes_sentinel(self):
         # check_buckets() still raises plain RuntimeError for a genuine
         # gh pr checks failure -- but verify_post now catches it rather
         # than letting it propagate uncaught. Under this dispatch point's
@@ -531,7 +531,7 @@ class TestFailOpen(unittest.TestCase):
                     with mock.patch("sys.stdout", captured):
                         exit_code = pr_status.verify_post(str(phase_dir))
 
-            self.assertEqual(exit_code, 1)
+            self.assertEqual(exit_code, 0)
             self.assertIn("gh pr checks failed", captured.getvalue())
             text = report_path.read_text(encoding="utf-8")
             self.assertIn("pr_status: unavailable", text)
@@ -633,7 +633,7 @@ class TestFailOpen(unittest.TestCase):
             self.assertEqual(fields["pr_status"], "unavailable")
             self.assertEqual(fields["pr_gate_ok"], "false")
 
-    def test_malformed_pr_json_writes_sentinel_and_returns_nonzero(self):
+    def test_malformed_pr_json_writes_sentinel(self):
         # gh JSON that parses but lacks `number` raises KeyError -- outside
         # the fail-open tuple and not a RuntimeError. Uncaught, it would skip
         # the regeneration and leave the stale report. Loud but never stale.
@@ -659,7 +659,7 @@ class TestFailOpen(unittest.TestCase):
                     with mock.patch("sys.stdout", captured):
                         exit_code = pr_status.verify_post(str(phase_dir))
 
-            self.assertEqual(exit_code, 1)
+            self.assertEqual(exit_code, 0)
             fields = _frontmatter(report_path.read_text(encoding="utf-8"))
             self.assertEqual(fields["pr_status"], "unavailable")
             self.assertEqual(fields["pr_gate_ok"], "false")
@@ -866,6 +866,49 @@ class TestNonUtf8Output(unittest.TestCase):
                 fields = self._run_with_fake_bins(**{key: body})
                 self.assertEqual(fields["pr_status"], "unavailable")
                 self.assertEqual(fields["pr_gate_ok"], "false")
+
+
+STALE_PASS = "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n"
+
+
+class TestStaleNeverSurvives(unittest.TestCase):
+    """kilo.5: no exception path may leave a prior pr_gate_ok:true behind.
+    Every unavailable outcome exits 0 (README/SKILL: fail-open, onError:skip)."""
+
+    def test_no_planning_dir_still_writes_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = Path(tmp) / "14-x"
+            phase_dir.mkdir()
+            (phase_dir / "14-PR.md").write_text(STALE_PASS, encoding="utf-8")
+            exit_code, _, _ = _verify(phase_dir)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(_report(phase_dir)["pr_gate_ok"], "false")
+
+    def test_write_failure_removes_stale_report_and_exits_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            (phase_dir / "14-PR.md").write_text(STALE_PASS, encoding="utf-8")
+            with mock.patch.object(pr_status.os, "replace", side_effect=OSError("ro")):
+                exit_code, _, _ = _verify(phase_dir)
+            self.assertEqual(exit_code, 1)
+            self.assertFalse((phase_dir / "14-PR.md").exists())
+
+    def test_torn_write_never_reaches_report_path(self):
+        real = Path.write_text
+
+        def torn(self_, data, *a, **kw):
+            real(self_, data[: len(data) // 2], *a, **kw)
+            raise OSError("killed mid-write")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            (phase_dir / "14-PR.md").write_text(STALE_PASS, encoding="utf-8")
+            with mock.patch.object(Path, "write_text", torn):
+                _verify(phase_dir)
+            report = phase_dir / "14-PR.md"
+            text = report.read_text(encoding="utf-8") if report.exists() else ""
+            self.assertNotIn("pr_gate_ok: true", text)
+            self.assertIn(text.count("---"), (0, 2))
 
 
 class TestConfined(unittest.TestCase):

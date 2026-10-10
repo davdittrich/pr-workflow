@@ -10,6 +10,7 @@ default -- no `gh`/`git` command is ever assembled as a shell string
 """
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -202,7 +203,10 @@ def _write_report(out_path, phase_dir, generated_at, generated_from, pr_status,
         f"# PR.md: {phase_dir.name}\n\n"
         "> Regenerated every step. Do not hand-edit.\n"
     )
-    out_path.write_text("\n".join(lines) + "\n" + body, encoding="utf-8")
+    # Atomic: a kill mid-write must not leave a torn report at out_path.
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    tmp_path.write_text("\n".join(lines) + "\n" + body, encoding="utf-8")
+    os.replace(tmp_path, out_path)
 
 
 def verify_post(phase_dir_arg):
@@ -227,108 +231,117 @@ def verify_post(phase_dir_arg):
     (RESEARCH Pitfall 3) -- a genuine tool failure that is not the
     zero-checks case must not be laundered into a `pr_status` of `passing`
     or `failing`. It IS caught here, separately from the fail-open tuple
-    above, and returns exit 1 (not 0): under this dispatch point's
+    above: under this dispatch point's
     `onError: skip` contract, an UNCAUGHT exception does not fail the
     phase -- it only skips regenerating PR.md, leaving whatever the
     PREVIOUS successful run wrote (e.g. `pr_gate_ok: true`) stale on disk,
     which is exactly the "stale status satisfies the gate" failure T-14-01
     exists to prevent. Catching and still writing the `unavailable`
-    sentinel keeps both properties: the failure is loud (nonzero exit,
-    printed message) AND the artifact is never stale.
+    sentinel keeps both properties: the failure is loud (printed message)
+    AND the artifact is never stale.
+
+    Every unavailable outcome exits 0 (fail-open, per README/SKILL); the
+    one exit 1 is the last resort when even the sentinel cannot be written.
     """
     phase_dir = Path(phase_dir_arg).resolve()
-    project_root = find_project_root(phase_dir)
     padded_phase = phase_dir.name.split("-", 1)[0]
-    out_path = confined(project_root, phase_dir.relative_to(project_root), f"{padded_phase}-PR.md")
+    out_path = phase_dir / f"{padded_phase}-PR.md"  # replaced by the confined path below
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    available, reason = gh_available()
-    if not available:
-        print(reason)
-        _write_report(
-            out_path, phase_dir, generated_at,
-            generated_from=f"none ({reason})",
-            pr_status="unavailable", pr_gate_ok=False,
-            pr_number=None, open_pr_count=0,
-            unavailable_reason=reason,
-        )
-        return 0
-
     try:
-        branch = current_branch()
-        prs = find_open_pr(branch)
-        generated_from = f"gh pr list --head {branch} --state open --json number,url"
-
-        if not prs:
+        project_root = find_project_root(phase_dir)
+        out_path = confined(project_root, phase_dir.relative_to(project_root), f"{padded_phase}-PR.md")
+        available, reason = gh_available()
+        if not available:
+            print(reason)
             _write_report(
-                out_path, phase_dir, generated_at, generated_from=generated_from,
-                pr_status="none", pr_gate_ok=True,
+                out_path, phase_dir, generated_at,
+                generated_from=f"none ({reason})",
+                pr_status="unavailable", pr_gate_ok=False,
                 pr_number=None, open_pr_count=0,
+                unavailable_reason=reason,
             )
-            print("PR.md regenerated: no open PR (pr_status=none)")
             return 0
 
-        # D-02/RESEARCH A4: more than one open PR can target one head
-        # branch (different base branches). Take the first entry and record
-        # the count rather than silently collapsing it.
-        open_pr_count = len(prs)
-        pr_number = prs[0]["number"]
-        checks_generated_from = generated_from + f"; gh pr checks {pr_number} --json bucket"
-        buckets = check_buckets(pr_number)
-        pr_status = rollup_pr_status(buckets)
-        pr_gate_ok = derive_gate_ok(pr_status)
-        generated_from = checks_generated_from
-    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, GhCommandError) as exc:
-        # GhCommandError IS-A RuntimeError (see its class docstring) --
-        # this clause must stay ordered BEFORE the bare `except RuntimeError`
-        # below so a GhCommandError (fail-open eligible) is never caught by
-        # the more general clause meant only for check_buckets()'s plain
-        # RuntimeError (a genuine, non-fail-open tool failure).
-        print(NOTICE_GH_ERROR)
-        _write_report(
-            out_path, phase_dir, generated_at,
-            generated_from="none (gh command failed)",
-            pr_status="unavailable", pr_gate_ok=False,
-            pr_number=None, open_pr_count=0,
-            unavailable_reason=f"{type(exc).__name__}: {exc}",
-        )
-        return 0
-    except RuntimeError as exc:
-        print(f"gh pr checks failed: {exc}")
-        _write_report(
-            out_path, phase_dir, generated_at,
-            generated_from="none (gh pr checks failed)",
-            pr_status="unavailable", pr_gate_ok=False,
-            pr_number=None, open_pr_count=0,
-            unavailable_reason=f"RuntimeError: {exc}",
-        )
-        return 1
-    except Exception as exc:  # noqa: BLE001 -- see below
-        # Backstop for the impossible-but-not-inexpressible: gh returning
-        # JSON that parses yet lacks `number`/`bucket` (KeyError), or any
-        # other unforeseen failure. Deliberately broad, for the same reason
-        # the two clauses above exist: under `onError: skip` an UNCAUGHT
-        # exception silently preserves the previous run's report, so "let it
-        # crash" here means "let a stale pr_gate_ok: true satisfy ship:pre".
-        # Loud (exit 1, printed) but never stale -- same trade as the
-        # RuntimeError clause.
-        print(f"pr status read failed unexpectedly: {type(exc).__name__}: {exc}")
-        _write_report(
-            out_path, phase_dir, generated_at,
-            generated_from="none (unexpected failure)",
-            pr_status="unavailable", pr_gate_ok=False,
-            pr_number=None, open_pr_count=0,
-            unavailable_reason=f"{type(exc).__name__}: {exc}",
-        )
-        return 1
+        try:
+            branch = current_branch()
+            prs = find_open_pr(branch)
+            generated_from = f"gh pr list --head {branch} --state open --json number,url"
 
-    _write_report(
-        out_path, phase_dir, generated_at, generated_from=generated_from,
-        pr_status=pr_status, pr_gate_ok=pr_gate_ok,
-        pr_number=pr_number, open_pr_count=open_pr_count,
-    )
-    print(f"PR.md regenerated: pr_status={pr_status}")
-    return 0
+            if not prs:
+                _write_report(
+                    out_path, phase_dir, generated_at, generated_from=generated_from,
+                    pr_status="none", pr_gate_ok=True,
+                    pr_number=None, open_pr_count=0,
+                )
+                print("PR.md regenerated: no open PR (pr_status=none)")
+                return 0
+
+            # D-02/RESEARCH A4: more than one open PR can target one head
+            # branch (different base branches). Take the first entry and record
+            # the count rather than silently collapsing it.
+            open_pr_count = len(prs)
+            pr_number = prs[0]["number"]
+            checks_generated_from = generated_from + f"; gh pr checks {pr_number} --json bucket"
+            buckets = check_buckets(pr_number)
+            pr_status = rollup_pr_status(buckets)
+            pr_gate_ok = derive_gate_ok(pr_status)
+            generated_from = checks_generated_from
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, GhCommandError) as exc:
+            # GhCommandError IS-A RuntimeError (see its class docstring) --
+            # this clause must stay ordered BEFORE the bare `except RuntimeError`
+            # below so a GhCommandError (fail-open eligible) is never caught by
+            # the more general clause meant only for check_buckets()'s plain
+            # RuntimeError (a genuine, non-fail-open tool failure).
+            print(NOTICE_GH_ERROR)
+            _write_report(
+                out_path, phase_dir, generated_at,
+                generated_from="none (gh command failed)",
+                pr_status="unavailable", pr_gate_ok=False,
+                pr_number=None, open_pr_count=0,
+                unavailable_reason=f"{type(exc).__name__}: {exc}",
+            )
+            return 0
+        except RuntimeError as exc:
+            print(f"gh pr checks failed: {exc}")
+            _write_report(
+                out_path, phase_dir, generated_at,
+                generated_from="none (gh pr checks failed)",
+                pr_status="unavailable", pr_gate_ok=False,
+                pr_number=None, open_pr_count=0,
+                unavailable_reason=f"RuntimeError: {exc}",
+            )
+            return 0
+
+        _write_report(
+            out_path, phase_dir, generated_at, generated_from=generated_from,
+            pr_status=pr_status, pr_gate_ok=pr_gate_ok,
+            pr_number=pr_number, open_pr_count=open_pr_count,
+        )
+        print(f"PR.md regenerated: pr_status={pr_status}")
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # Outermost backstop for everything above (no .planning/ ancestor,
+        # path escape, a failed report write): under `onError: skip` an
+        # uncaught exception keeps the previous run's report, i.e. a stale
+        # pr_gate_ok: true. Best effort: write the sentinel to the
+        # unconfined fallback path; if even that fails, delete the old
+        # report and exit 1.
+        print(f"pr status read failed unexpectedly: {type(exc).__name__}: {exc}")
+        try:
+            _write_report(
+                out_path, phase_dir, generated_at,
+                generated_from="none (unexpected failure)",
+                pr_status="unavailable", pr_gate_ok=False,
+                pr_number=None, open_pr_count=0,
+                unavailable_reason=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:  # noqa: BLE001
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return 1
+        return 0
 
 
 def ship_post_notice(phase_dir_arg):
