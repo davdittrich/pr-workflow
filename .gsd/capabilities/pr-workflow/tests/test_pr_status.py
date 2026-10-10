@@ -41,6 +41,47 @@ def _fixture(name):
     return (FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
+_STAGE_ARGV = {
+    ("gh", "auth", "status"): "auth",
+    ("git", "branch", "--show-current"): "branch",
+    ("gh", "pr", "list"): "list",
+    ("gh", "pr", "checks"): "checks",
+}
+
+
+def _verify(phase_dir, fn="verify_post", which="/usr/bin/gh", auth="", branch="feature-x\n",
+            pr_list=PR_LIST_ONE_OPEN, checks=None):
+    """Run pr_status.<fn>(phase_dir) against one fake gh/git. Each stage value
+    is a CompletedProcess, an exception instance (raised), or a str (stdout,
+    rc 0). Returns (exit_code, captured stdout, argv list of every call)."""
+    stages = {
+        "auth": auth, "branch": branch, "list": pr_list,
+        "checks": _fixture("checks_pass.json") if checks is None else checks,
+    }
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        stage = _STAGE_ARGV.get(tuple(argv[:3]))
+        if stage is None:
+            raise AssertionError(f"unexpected call: {argv}")
+        value = stages[stage]
+        if isinstance(value, BaseException):
+            raise value
+        return _completed(value) if isinstance(value, str) else value
+
+    captured = io.StringIO()
+    with mock.patch("shutil.which", return_value=which):
+        with mock.patch.object(pr_status.subprocess, "run", side_effect=fake_run):
+            with mock.patch("sys.stdout", captured):
+                exit_code = getattr(pr_status, fn)(str(phase_dir))
+    return exit_code, captured.getvalue(), calls
+
+
+def _report(phase_dir):
+    return _frontmatter((phase_dir / "14-PR.md").read_text(encoding="utf-8"))
+
+
 def _without_timestamp(text):
     """Drop the live `generated_at:` line so two runs are byte-comparable."""
     return "\n".join(l for l in text.splitlines() if not l.startswith("generated_at:"))
@@ -80,6 +121,13 @@ class TestRollupPrecedence(unittest.TestCase):
 
     def test_cancel_is_failing(self):
         self.assertEqual(pr_status.rollup_pr_status({"cancel"}), "failing")
+
+    def test_unknown_missing_or_empty_bucket_is_unavailable(self):
+        # kilo.4: only the documented vocabulary may roll up; anything else
+        # is unmeasured and must never reach pr_gate_ok:true.
+        for buckets in ({"weird"}, {"pass", "weird"}, {None}, {""}):
+            with self.subTest(buckets=buckets):
+                self.assertEqual(pr_status.rollup_pr_status(buckets), "unavailable")
 
     def test_empty_set_is_passing(self):
         # D-01: zero checks configured on an otherwise-open PR is passing,
@@ -272,6 +320,16 @@ class TestOpenPrReport(unittest.TestCase):
         fields = self._run("checks_skipping.json")
         self.assertEqual(fields["pr_status"], "passing")
         self.assertEqual(fields["pr_gate_ok"], "true")
+
+    def test_check_with_unknown_missing_or_empty_bucket_is_not_gate_ok(self):
+        for checks in ('[{"bucket": "weird"}]', "[{}]", '[{"bucket": ""}]'):
+            with self.subTest(checks=checks):
+                with tempfile.TemporaryDirectory() as tmp:
+                    phase_dir = _write_phase_dir(Path(tmp))
+                    _verify(phase_dir, checks=checks)
+                    fields = _report(phase_dir)
+                    self.assertEqual(fields["pr_status"], "unavailable")
+                    self.assertEqual(fields["pr_gate_ok"], "false")
 
     def test_two_open_prs_record_count_and_take_first(self):
         # D-02/RESEARCH A4: two open PRs can share one head branch (different

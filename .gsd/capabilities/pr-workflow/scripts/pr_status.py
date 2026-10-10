@@ -144,7 +144,7 @@ def check_buckets(pr_number):
         if "no checks reported" in stderr or "no commit found" in stderr:
             return set()
         raise RuntimeError(f"gh pr checks failed: {result.stderr}")
-    return {c["bucket"] for c in json.loads(result.stdout)}
+    return {c.get("bucket") for c in json.loads(result.stdout)}
 
 
 def rollup_pr_status(buckets):
@@ -155,6 +155,8 @@ def rollup_pr_status(buckets):
     passing, `cancel` contributes to failing alongside `fail`. An empty set
     (zero checks configured on an otherwise-open PR) is `passing`, never
     `none` -- `none` is reserved for "no open PR exists" (PRW-03)."""
+    if buckets - {"pass", "skipping", "fail", "cancel", "pending"}:
+        return "unavailable"  # unknown/missing/empty bucket: unmeasured, never passing
     if buckets & {"fail", "cancel"}:
         return "failing"
     if "pending" in buckets:
