@@ -852,6 +852,68 @@ class TestProjectRootGit(unittest.TestCase):
             self.assertEqual(git, ["git", "-C", str(Path(tmp).resolve()), "branch", "--show-current"])
 
 
+class TestMainDispatch(unittest.TestCase):
+    def test_verify_post_routes_phase_dir_and_returns_its_code(self):
+        with mock.patch.object(pr_status, "verify_post", return_value=7) as vp:
+            self.assertEqual(pr_status.main(["verify-post", "some/dir"]), 7)
+        vp.assert_called_once_with("some/dir")
+
+    def test_ship_post_notice_routes_phase_dir(self):
+        with mock.patch.object(pr_status, "ship_post_notice", return_value=0) as sp:
+            self.assertEqual(pr_status.main(["ship-post-notice", "some/dir"]), 0)
+        sp.assert_called_once_with("some/dir")
+
+    def test_bad_or_missing_subcommand_exits_2(self):
+        for argv in (["bogus", "x"], [], ["verify-post"]):
+            with self.subTest(argv=argv):
+                with mock.patch("sys.stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit) as cm:
+                        pr_status.main(argv)
+                self.assertEqual(cm.exception.code, 2)
+
+
+class TestUncoveredBranches(unittest.TestCase):
+    def _sentinel(self, **stages):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            exit_code, output, _ = _verify(phase_dir, **stages)
+            return exit_code, output, _report(phase_dir)
+
+    def test_no_commit_found_stderr_means_zero_checks_passing(self):
+        _, _, fields = self._sentinel(checks=_completed("", 1, stderr="no commit found for ref"))
+        self.assertEqual(fields["pr_status"], "passing")
+        self.assertEqual(fields["pr_gate_ok"], "true")
+
+    def test_cancelled_check_is_failing_end_to_end(self):
+        _, _, fields = self._sentinel(checks=_fixture("checks_cancel.json"))
+        self.assertEqual(fields["pr_status"], "failing")
+        self.assertEqual(fields["pr_gate_ok"], "false")
+
+    def test_live_call_failures_write_sentinel_and_exit_0(self):
+        failures = {
+            "checks timeout": {"checks": subprocess.TimeoutExpired(cmd="gh", timeout=30)},
+            "checks oserror": {"checks": OSError("spawn failed")},
+            "checks invalid json": {"checks": "not json"},
+            "list invalid json": {"pr_list": "not json"},
+            "branch oserror": {"branch": OSError("git vanished")},
+            "branch timeout": {"branch": subprocess.TimeoutExpired(cmd="git", timeout=10)},
+        }
+        for name, stages in failures.items():
+            with self.subTest(name):
+                exit_code, _, fields = self._sentinel(**stages)
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(fields["pr_status"], "unavailable")
+                self.assertEqual(fields["pr_gate_ok"], "false")
+
+    def test_ship_post_notice_branch_oserror_fails_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            exit_code, output, _ = _verify(
+                phase_dir, fn="ship_post_notice", branch=OSError("git vanished"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(output.count(pr_status.NOTICE_GH_ERROR), 1)
+
+
 class TestStaleNeverSurvives(unittest.TestCase):
     """kilo.5: no exception path may leave a prior pr_gate_ok:true behind.
     Every unavailable outcome exits 0 (README/SKILL: fail-open, onError:skip)."""
