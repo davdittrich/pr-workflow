@@ -2,13 +2,55 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
-jobs:
-  checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+permissions:
+  contents: read
 
-      - name: Run capability test suite
-        run: python3 -m unittest discover -s tests -v
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Unit tests
+        env:
+          HOME: ${{ runner.temp }}/home
+          GSD_HOME: ${{ runner.temp }}/home
+        run: |
+          mkdir -p "$HOME"
+          python3 -I -m unittest discover -s tests -v
+
+  hooks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # tests/test-root-capability.sh needs a gsd-core install and is not run here.
+      - name: Hook and manifest tests
+        env:
+          HOME: ${{ runner.temp }}/home
+          GSD_HOME: ${{ runner.temp }}/home
+        run: |
+          mkdir -p "$HOME"
+          bash tests/test-capability-auto-install.sh
+          bash tests/test-versions.sh
