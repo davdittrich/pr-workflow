@@ -1,4 +1,4 @@
-"""Tests for .gsd/capabilities/pr-workflow/scripts/pr_status.py.
+"""Tests for scripts/pr_status.py.
 
 Stdlib unittest only (N5, mirrors markdown-linting/tests/test_lint.py's R-01
 finding): the suite must pass under `python3 -m unittest discover` with no

@@ -6,7 +6,7 @@ Wraps gh CLI to read PR/check status for the current branch; execute:wave:post w
 
 Two lifecycle steps and one gate:
 
-- **`execute:wave:post`** runs `.gsd/capabilities/pr-workflow/scripts/pr_status.py verify-post
+- **`execute:wave:post`** runs `scripts/pr_status.py verify-post
   <phase_dir>`, which regenerates a phase-scoped `{phase_dir}/{padded_phase}-PR.md` report on every
   invocation from a live `gh` read of the current branch's open PR and its check status. The report
   is fully overwritten every run, never merged with a prior hand edit, so a stale status can never
