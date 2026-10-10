@@ -49,7 +49,19 @@ run and follow the matching branch -- do not collapse the two into one call.
 Run one Bash call passing only the phase directory:
 
 ```bash
-python3 .gsd/capabilities/pr-workflow/scripts/pr_status.py verify-post <phase directory>
+PR_PY=""
+for candidate in \
+  "${CLAUDE_PROJECT_DIR:-}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
+  "${GSD_HOME:-$HOME}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
+  "${CLAUDE_PLUGIN_ROOT:-}/scripts/pr_status.py"
+do
+  if [ -f "$candidate" ]; then PR_PY="$candidate"; break; fi
+done
+if [ -z "$PR_PY" ]; then
+  echo "pr-workflow: pr_status.py not found in project, global, or plugin roots" >&2
+  exit 1
+fi
+python3 -I "$PR_PY" verify-post <phase directory>
 ```
 
 Print `pr_status.py`'s stdout summary verbatim (`PR.md regenerated: pr_status=<state>` or
@@ -60,7 +72,19 @@ Print `pr_status.py`'s stdout summary verbatim (`PR.md regenerated: pr_status=<s
 Run one Bash call passing only the phase directory:
 
 ```bash
-python3 .gsd/capabilities/pr-workflow/scripts/pr_status.py ship-post-notice <phase directory>
+PR_PY=""
+for candidate in \
+  "${CLAUDE_PROJECT_DIR:-}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
+  "${GSD_HOME:-$HOME}/.gsd/capabilities/pr-workflow/scripts/pr_status.py" \
+  "${CLAUDE_PLUGIN_ROOT:-}/scripts/pr_status.py"
+do
+  if [ -f "$candidate" ]; then PR_PY="$candidate"; break; fi
+done
+if [ -z "$PR_PY" ]; then
+  echo "pr-workflow: pr_status.py not found in project, global, or plugin roots" >&2
+  exit 1
+fi
+python3 -I "$PR_PY" ship-post-notice <phase directory>
 ```
 
 Print its stdout verbatim, including the empty-output case (`ship_post_notice` prints nothing when
