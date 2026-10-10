@@ -437,12 +437,15 @@ class TestNonUtf8Output(unittest.TestCase):
         """Run verify_post against real fake `gh`/`git` executables on PATH so
         the real subprocess decode path is exercised. stages maps a stage
         (branch, list, checks) to shell that emits non-UTF8 bytes."""
+        list_sh = stages.get("list", 'echo [{\\"number\\":1}]')
+        checks_sh = stages.get("checks", 'echo [{\\"bucket\\":\\"pass\\"}]')
+        branch_sh = stages.get("branch", "echo feature-x")
         scripts = {
             "gh": 'case "$1 $2" in\n'
-                  f'  "pr list") {stages.get("list", "echo [{{\\\"number\\\":1}}]")} ;;\n'
-                  f'  "pr checks") {stages.get("checks", "echo [{{\\\"bucket\\\":\\\"pass\\\"}}]")} ;;\n'
+                  f'  "pr list") {list_sh} ;;\n'
+                  f'  "pr checks") {checks_sh} ;;\n'
                   "esac\n",
-            "git": f'{stages.get("branch", "echo feature-x")}\n',
+            "git": f"{branch_sh}\n",
         }
         with tempfile.TemporaryDirectory() as tmp:
             bindir = Path(tmp) / "bin"
