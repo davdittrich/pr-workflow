@@ -47,7 +47,6 @@ def _fixture(name):
 
 _STAGE_ARGV = {
     ("gh", "auth", "status"): "auth",
-    ("git", "branch", "--show-current"): "branch",
     ("gh", "pr", "list"): "list",
     ("gh", "pr", "checks"): "checks",
 }
@@ -66,7 +65,7 @@ def _verify(phase_dir, fn="verify_post", which="/usr/bin/gh", auth="", branch="f
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
-        stage = _STAGE_ARGV.get(tuple(argv[:3]))
+        stage = "branch" if argv[0] == "git" else _STAGE_ARGV.get(tuple(argv[:3]))
         if stage is None:
             raise AssertionError(f"unexpected call: {argv}")
         value = stages[stage]
@@ -160,7 +159,7 @@ class TestCurrentBranch(unittest.TestCase):
             return_value=_completed("", 1, stderr="fatal: not a git repository"),
         ):
             with self.assertRaises(pr_status.GhCommandError):
-                pr_status.current_branch()
+                pr_status.current_branch(Path("."))
 
 
 class TestVerifyPost(unittest.TestCase):
@@ -175,7 +174,7 @@ class TestVerifyPost(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(_fixture("pr_list_empty.json"), 0)
@@ -203,7 +202,7 @@ class TestVerifyPost(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-x\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(PR_LIST_ONE_OPEN, 0)
@@ -229,7 +228,7 @@ class TestVerifyPost(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed('feature"pwn\n', 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(_fixture("pr_list_empty.json"), 0)
@@ -257,7 +256,7 @@ class TestVerifyPost(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(_fixture("pr_list_empty.json"), 0)
@@ -294,7 +293,7 @@ class TestOpenPrReport(unittest.TestCase):
         def fake_run(argv, **kwargs):
             if argv[:3] == ["gh", "auth", "status"]:
                 return _completed("", 0)
-            if argv[:3] == ["git", "branch", "--show-current"]:
+            if argv[0] == "git":
                 return _completed("feature-x\n", 0)
             if argv[:3] == ["gh", "pr", "list"]:
                 return _completed(pr_list, 0)
@@ -434,7 +433,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
@@ -462,7 +461,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed("", 1, stderr="HTTP 403: rate limited")
@@ -486,7 +485,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-x\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(PR_LIST_ONE_OPEN, 0)
@@ -521,7 +520,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-x\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(PR_LIST_ONE_OPEN, 0)
@@ -555,7 +554,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed("", 1, stderr="HTTP 403: rate limited")
@@ -585,7 +584,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(
@@ -652,7 +651,7 @@ class TestFailOpen(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(json.dumps([{"url": "https://example.invalid/1"}]), 0)
@@ -696,7 +695,7 @@ class TestShipPostNotice(unittest.TestCase):
                 calls.append(argv)
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-y\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(_fixture("pr_list_empty.json"), 0)
@@ -725,7 +724,7 @@ class TestShipPostNotice(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-y\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(PR_LIST_ONE_OPEN, 0)
@@ -751,7 +750,7 @@ class TestShipPostNotice(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("feature-y\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
@@ -814,7 +813,7 @@ class TestShipPostNotice(unittest.TestCase):
             def fake_run(argv, **kwargs):
                 if argv[:3] == ["gh", "auth", "status"]:
                     return _completed("", 0)
-                if argv[:3] == ["git", "branch", "--show-current"]:
+                if argv[0] == "git":
                     return _completed("main\n", 0)
                 if argv[:3] == ["gh", "pr", "list"]:
                     return _completed(_fixture("pr_list_empty.json"), 0)
@@ -912,6 +911,18 @@ class TestFindOpenPr(unittest.TestCase):
                 fields, _ = self._verify(pr_list=body)
                 self.assertEqual(fields["pr_status"], "unavailable")
                 self.assertEqual(fields["pr_gate_ok"], "false")
+
+
+class TestProjectRootGit(unittest.TestCase):
+    """kilo.17: the branch is read with `git -C <project root>`, never from
+    whatever directory the dispatcher happened to be in."""
+
+    def test_git_branch_runs_in_project_root_not_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            _, _, calls = _verify(phase_dir)
+            git = next(c for c in calls if c[0] == "git")
+            self.assertEqual(git, ["git", "-C", str(Path(tmp).resolve()), "branch", "--show-current"])
 
 
 class TestStaleNeverSurvives(unittest.TestCase):

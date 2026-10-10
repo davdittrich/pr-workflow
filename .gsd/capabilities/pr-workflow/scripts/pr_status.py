@@ -101,9 +101,9 @@ def gh_available():
     return True, None
 
 
-def current_branch():
+def current_branch(root):
     result = subprocess.run(
-        ["git", "branch", "--show-current"], capture_output=True, text=True, errors="replace", timeout=10,
+        ["git", "-C", str(root), "branch", "--show-current"], capture_output=True, text=True, errors="replace", timeout=10,
     )
     if result.returncode != 0:
         raise GhCommandError(f"git branch --show-current failed: {result.stderr}")
@@ -272,7 +272,7 @@ def verify_post(phase_dir_arg):
             return 0
 
         try:
-            branch = current_branch()
+            branch = current_branch(project_root)
             prs = find_open_pr(branch)
             generated_from = (
                 f"gh pr list --head={branch} --state open --limit 100"
@@ -358,8 +358,8 @@ def verify_post(phase_dir_arg):
 
 def ship_post_notice(phase_dir_arg):
     """ship:post dispatch (PRW-03): print a warn-only notice when the
-    current branch has no open PR. `phase_dir_arg` is accepted only for CLI
-    signature parity with `verify-post` -- this function reads and writes
+    current branch has no open PR. `phase_dir_arg` is used only to locate the
+    project root for `git -C` -- this function reads and writes
     no file (never `PR.md`, which could be stale for a PR merged or closed
     since the last `execute:wave:post` run -- RESEARCH Pitfall 2) and
     mutates no git/GitHub state. Returns 0 on every path; issues no `gh`
@@ -371,14 +371,17 @@ def ship_post_notice(phase_dir_arg):
     availability guard already passed must not crash `ship:post`'s
     onError: "skip" dispatch with an uncaught traceback.
     """
-    del phase_dir_arg  # unused: no file is read or written on this path
+    try:
+        project_root = find_project_root(Path(phase_dir_arg))
+    except ValueError:
+        project_root = Path.cwd()  # no file is read or written; only locates git
     available, reason = gh_available()
     if not available:
         print(reason)
         return 0
 
     try:
-        branch = current_branch()
+        branch = current_branch(project_root)
         prs = find_open_pr(branch)
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, GhCommandError):
         print(NOTICE_GH_ERROR)
