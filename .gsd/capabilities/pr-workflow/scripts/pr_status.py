@@ -92,7 +92,7 @@ def gh_available():
     if shutil.which("gh") is None:
         return False, NOTICE_GH_ABSENT
     try:
-        auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
+        auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, errors="replace", timeout=15)
     except (subprocess.TimeoutExpired, OSError):
         return False, NOTICE_GH_ERROR
     if auth.returncode != 0:
@@ -102,7 +102,7 @@ def gh_available():
 
 def current_branch():
     result = subprocess.run(
-        ["git", "branch", "--show-current"], capture_output=True, text=True, timeout=10,
+        ["git", "branch", "--show-current"], capture_output=True, text=True, errors="replace", timeout=10,
     )
     if result.returncode != 0:
         raise GhCommandError(f"git branch --show-current failed: {result.stderr}")
@@ -121,7 +121,7 @@ def find_open_pr(branch):
     "gh blew up after the availability guard passed" as a timeout is."""
     result = subprocess.run(
         ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,url"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, errors="replace", timeout=30,
     )
     if result.returncode != 0:
         raise GhCommandError(f"gh pr list failed: {result.stderr}")
@@ -137,7 +137,7 @@ def check_buckets(pr_number):
     genuine tool failure and must not be laundered into a status."""
     result = subprocess.run(
         ["gh", "pr", "checks", str(pr_number), "--json", "bucket"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, errors="replace", timeout=30,
     )
     if result.returncode != 0:
         stderr = result.stderr.lower()

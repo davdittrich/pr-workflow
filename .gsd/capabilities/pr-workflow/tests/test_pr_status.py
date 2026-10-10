@@ -8,6 +8,7 @@ mirrors test_lint.py's own sys.path.insert technique.
 """
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -752,6 +753,50 @@ class TestShipPostNotice(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertFalse((phase_dir / "14-PR.md").exists())
+
+
+class TestNonUtf8Output(unittest.TestCase):
+    """kilo.3: `text=True` without errors= made b'\\xff' from gh/git raise
+    UnicodeDecodeError past every fail-open guard, keeping a stale report."""
+
+    def _run_with_fake_bins(self, **stages):
+        """Run verify_post against real fake `gh`/`git` executables on PATH so
+        the real subprocess decode path is exercised. stages maps a stage
+        (auth, branch, list, checks) to shell that emits non-UTF8 bytes."""
+        scripts = {
+            "gh": 'case "$1 $2" in\n'
+                  f'  "auth status") {stages.get("auth", "exit 0")} ;;\n'
+                  f'  "pr list") {stages.get("list", "echo [{{\\\"number\\\":1}}]")} ;;\n'
+                  f'  "pr checks") {stages.get("checks", "echo [{{\\\"bucket\\\":\\\"pass\\\"}}]")} ;;\n'
+                  "esac\n",
+            "git": f'{stages.get("branch", "echo feature-x")}\n',
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            for name, body in scripts.items():
+                (bindir / name).write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                (bindir / name).chmod(0o755)
+            phase_dir = _write_phase_dir(Path(tmp))
+            report = phase_dir / "14-PR.md"
+            report.write_text("---\npr_status: passing\npr_gate_ok: true\n---\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"}):
+                with mock.patch("sys.stdout", io.StringIO()):
+                    pr_status.verify_post(str(phase_dir))
+            return _frontmatter(report.read_text(encoding="utf-8"))
+
+    def test_non_utf8_bytes_at_every_stage_still_write_sentinel(self):
+        bad_err = "printf '\\377' >&2; exit 1"
+        bad_out = "printf '\\377'"
+        for stage, body in {
+            "auth": bad_err, "branch": bad_err, "list": bad_err, "list-stdout": bad_out,
+            "checks": bad_err,
+        }.items():
+            with self.subTest(stage=stage):
+                key = "list" if stage == "list-stdout" else stage
+                fields = self._run_with_fake_bins(**{key: body})
+                self.assertEqual(fields["pr_status"], "unavailable")
+                self.assertEqual(fields["pr_gate_ok"], "false")
 
 
 class TestConfined(unittest.TestCase):
