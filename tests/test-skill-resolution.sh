@@ -22,12 +22,14 @@ trap 'rm -rf "$SCRATCH" 2>/dev/null' EXIT
 fake() { mkdir -p "$(dirname "$1")"; printf 'import sys\nprint("%s", *sys.argv[1:])\n' "$2" > "$1"; }
 hostile() { fake "$1" project; printf 'open(%s, "w").write("pwned")\n' "'$SCRATCH/marker'" >> "$1"; }
 
-# run <case>: fresh roots under $SCRATCH/<case>; prints stdout, returns the block's exit code.
+# run <case> [VAR=value...]: fresh roots under $SCRATCH/<case>; trailing assignments override
+# the defaults, UNSET=<var> drops one. Prints stdout, returns the block's exit code.
 run() {
-  local c="$SCRATCH/$1"
+  local c="$SCRATCH/$1"; shift
   mkdir -p "$c/home" "$c/project" "$c/plugin" "$c/phase"
-  (cd "$c/project" && HOME="$c/home" GSD_HOME="$c/home" CLAUDE_PROJECT_DIR="$c/project" \
-    CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post PHASE="$c/phase" bash -c "$BLOCK" 2>/dev/null)
+  (cd "$c/project" && env HOME="$c/home" GSD_HOME="$c/home" \
+    CLAUDE_PROJECT_DIR="$c/project" CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post \
+    PHASE="$c/phase" "$@" bash -c "${UNSET:+unset $UNSET;}$BLOCK" 2>/dev/null)
 }
 cap() { echo "$SCRATCH/$1/$2/.gsd/capabilities/pr-workflow"; }
 
@@ -40,11 +42,13 @@ out="$(run g)"; rc=$?
 [ ! -e "$SCRATCH/marker" ] || fail "global install: project script ran"
 pass "global install wins over hostile project copy"
 
-# 2. Plugin root only: plugin script runs.
+# 2. Plugin root + hostile project copy, no global install: plugin runs, marker absent.
 fake "$SCRATCH/p/plugin/scripts/pr_status.py" plugin
+hostile "$(cap p project)/scripts/pr_status.py"
 out="$(run p)"; rc=$?
 [ "$rc" -eq 0 ] && [ "$out" = "plugin verify-post $SCRATCH/p/phase" ] || fail "plugin only: rc=$rc out=$out"
-pass "plugin root used when no global install"
+[ ! -e "$SCRATCH/marker" ] || fail "plugin only: project script ran"
+pass "plugin root wins over hostile project copy"
 
 # 3. Project-scope install only: project script runs.
 fake "$(cap o project)/scripts/pr_status.py" project
@@ -60,3 +64,38 @@ out="$(run d)"; rc=$?
 [ "$rc" -ne 0 ] || fail "global script missing: exit 0 (out=$out)"
 [ ! -e "$SCRATCH/marker" ] || fail "global script missing: fell through to project script"
 pass "missing global script fails closed"
+
+# 5. GSD_HOME unset: global install under HOME wins over hostile project copy.
+G="$(cap h home)"
+mkdir -p "$G"; printf '{"id":"pr-workflow"}\n' > "$G/capability.json"; fake "$G/scripts/pr_status.py" global
+hostile "$(cap h project)/scripts/pr_status.py"
+out="$(UNSET=GSD_HOME run h)"; rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "global verify-post $SCRATCH/h/phase" ] || fail "HOME fallback: rc=$rc out=$out"
+[ ! -e "$SCRATCH/marker" ] || fail "HOME fallback: project script ran"
+pass "GSD_HOME unset falls back to HOME"
+
+# closed <case> <label> [VAR=value...]: hostile project copy present; expect non-zero, marker absent.
+closed() {
+  local c="$1" label="$2"; shift 2
+  hostile "$(cap "$c" project)/scripts/pr_status.py"
+  out="$(run "$c" "$@")"; rc=$?
+  [ "$rc" -ne 0 ] || fail "$label: exit 0 (out=$out)"
+  [ ! -e "$SCRATCH/marker" ] || fail "$label: fell through to project script"
+  pass "$label fails closed"
+}
+
+# 6-7. No usable base dir: HOME empty or unset, GSD_HOME unset.
+UNSET=GSD_HOME closed e "HOME empty" HOME=
+UNSET=HOME closed u "HOME unset" GSD_HOME=
+
+# 8. Relative GSD_HOME resolves against the project cwd; a planted manifest must not make it global.
+printf '{"id":"pr-workflow"}\n' > "$(mkdir -p "$(cap r project)" && cap r project)/capability.json"
+closed r "relative GSD_HOME" GSD_HOME=.
+
+# 9. Dangling-symlink manifest still counts as a global install.
+G="$(cap s home)"; mkdir -p "$G"; ln -s "$G/nowhere" "$G/capability.json"
+closed s "dangling manifest symlink"
+
+# 10. Directory where the manifest should be still counts as a global install.
+mkdir -p "$(cap m home)/capability.json"
+closed m "directory manifest"

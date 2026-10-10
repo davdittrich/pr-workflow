@@ -51,6 +51,10 @@ A `SessionStart` hook (`startup`, `resume`) installs the bundle (`capability.jso
 claude plugin uninstall pr-workflow -y
 ```
 
+## Script resolution
+
+`pr_status.py` resolves from the global manifest, then `CLAUDE_PLUGIN_ROOT`, then the project copy; the agent's Bash env may lack `CLAUDE_PLUGIN_ROOT`, so with no global manifest the project copy runs (project-scope installs).
+
 ## Tests
 
 ```bash
