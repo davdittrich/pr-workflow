@@ -21,7 +21,11 @@ import pr_status  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
-PR_LIST_ONE_OPEN = json.dumps([{"number": 42, "url": "https://github.com/x/y/pull/42"}])
+def _pr(number, cross=False):
+    return {"number": number, "url": f"https://github.com/x/y/pull/{number}", "isCrossRepository": cross}
+
+
+PR_LIST_ONE_OPEN = json.dumps([_pr(42)])
 
 
 def _write_phase_dir(tmp_path, phase_dir_name="14-pr-workflow-capability-dogfood"):
@@ -240,7 +244,7 @@ class TestVerifyPost(unittest.TestCase):
             line = next(l for l in text.splitlines() if l.startswith("generated_from:"))
             self.assertEqual(
                 line,
-                'generated_from: "gh pr list --head feature\\"pwn --state open --json number,url"',
+                'generated_from: "gh pr list --head=feature\\"pwn --state open --limit 100 --json number,url,isCrossRepository"',
             )
             # frontmatter block boundaries stay intact -- no unquoted
             # trailing text leaked onto the generated_from line.
@@ -346,8 +350,8 @@ class TestOpenPrReport(unittest.TestCase):
         # D-02/RESEARCH A4: two open PRs can share one head branch (different
         # base branches). The count must be recorded, not silently collapsed.
         two_open = json.dumps([
-            {"number": 42, "url": "https://github.com/x/y/pull/42"},
-            {"number": 43, "url": "https://github.com/x/y/pull/43"},
+            _pr(42),
+            _pr(43),
         ])
         fields = self._run("checks_pass.json", pr_list=two_open)
         self.assertEqual(fields["pr_number"], "42")
@@ -869,6 +873,45 @@ class TestNonUtf8Output(unittest.TestCase):
 
 
 STALE_PASS = "---\npr_status: passing\npr_gate_ok: true\n---\n\nstale\n"
+
+
+class TestFindOpenPr(unittest.TestCase):
+    """kilo.6: PR lookup must be exact (--head=<b>, owner-qualified, paged
+    past gh's default 30) and fail closed on an unusable branch or JSON."""
+
+    def _verify(self, **stages):
+        with tempfile.TemporaryDirectory() as tmp:
+            phase_dir = _write_phase_dir(Path(tmp))
+            _, _, calls = _verify(phase_dir, **stages)
+            return _report(phase_dir), calls
+
+    def test_detached_head_is_unavailable_without_querying_gh(self):
+        fields, calls = self._verify(branch="\n")
+        self.assertEqual(fields["pr_status"], "unavailable")
+        self.assertEqual(fields["pr_gate_ok"], "false")
+        self.assertNotIn(["gh", "pr", "list"], [c[:3] for c in calls])
+
+    def test_pr_list_argv_is_exact_and_unpaged_limit_raised(self):
+        _, calls = self._verify()
+        argv = next(c for c in calls if c[:3] == ["gh", "pr", "list"])
+        self.assertIn("--head=feature-x", argv)
+        self.assertEqual(argv[argv.index("--limit") + 1], "100")
+
+    def test_fork_pr_with_same_branch_name_is_ignored(self):
+        fields, _ = self._verify(pr_list=json.dumps([_pr(7, cross=True), _pr(42)]))
+        self.assertEqual(fields["pr_number"], "42")
+        self.assertEqual(fields["open_pr_count"], "1")
+
+    def test_only_fork_pr_means_no_open_pr(self):
+        fields, _ = self._verify(pr_list=json.dumps([_pr(7, cross=True)]))
+        self.assertEqual(fields["pr_status"], "none")
+
+    def test_non_list_json_is_unavailable(self):
+        for body in ("null", "{}", '"x"'):
+            with self.subTest(body=body):
+                fields, _ = self._verify(pr_list=body)
+                self.assertEqual(fields["pr_status"], "unavailable")
+                self.assertEqual(fields["pr_gate_ok"], "false")
 
 
 class TestStaleNeverSurvives(unittest.TestCase):

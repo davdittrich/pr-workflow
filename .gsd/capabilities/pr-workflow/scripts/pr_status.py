@@ -107,7 +107,10 @@ def current_branch():
     )
     if result.returncode != 0:
         raise GhCommandError(f"git branch --show-current failed: {result.stderr}")
-    return result.stdout.strip()
+    branch = result.stdout.strip()
+    if not branch:
+        raise GhCommandError("detached HEAD: no current branch to match a PR against")
+    return branch
 
 
 def find_open_pr(branch):
@@ -121,12 +124,18 @@ def find_open_pr(branch):
     from the caller's perspective a `gh pr list` failure is exactly as
     "gh blew up after the availability guard passed" as a timeout is."""
     result = subprocess.run(
-        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,url"],
+        ["gh", "pr", "list", f"--head={branch}", "--state", "open", "--limit", "100",
+         "--json", "number,url,isCrossRepository"],
         capture_output=True, text=True, errors="replace", timeout=30,
     )
     if result.returncode != 0:
         raise GhCommandError(f"gh pr list failed: {result.stderr}")
-    return json.loads(result.stdout)
+    prs = json.loads(result.stdout)
+    if not isinstance(prs, list):
+        raise GhCommandError(f"gh pr list returned non-list JSON: {result.stdout[:80]!r}")
+    # `--head` matches the branch name only; a fork PR with the same head
+    # name is someone else's PR, not this branch's.
+    return [pr for pr in prs if not pr["isCrossRepository"]]
 
 
 def check_buckets(pr_number):
@@ -265,7 +274,10 @@ def verify_post(phase_dir_arg):
         try:
             branch = current_branch()
             prs = find_open_pr(branch)
-            generated_from = f"gh pr list --head {branch} --state open --json number,url"
+            generated_from = (
+                f"gh pr list --head={branch} --state open --limit 100"
+                " --json number,url,isCrossRepository"
+            )
 
             if not prs:
                 _write_report(
