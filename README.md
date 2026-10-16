@@ -53,7 +53,7 @@ claude plugin uninstall pr-workflow -y
 
 ## Script resolution
 
-`pr_status.py` resolves from the global manifest, then `CLAUDE_PLUGIN_ROOT`, then the project copy; the agent's Bash env may lack `CLAUDE_PLUGIN_ROOT`, so with no global manifest the project copy runs (project-scope installs).
+`pr_status.py` resolves from the global manifest, then `CLAUDE_PLUGIN_ROOT`. With neither, the skill exits 1 (`pr_status.py not found in global or plugin roots`); it never runs the project copy, because a cloned repo can plant one. Project-scope installs are unsupported; install at global scope.
 
 ## Tests
 

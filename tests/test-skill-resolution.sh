@@ -2,7 +2,7 @@
 # The pr-workflow-report SKILL.md Step 3 block picks which pr_status.py the agent runs.
 # A repo can plant .gsd/capabilities/pr-workflow/scripts/pr_status.py, so a global
 # install (keyed on its capability.json) must win and its absence must never fall
-# through to the project copy. Runs the fenced bash block from SKILL.md verbatim.
+# through to the project copy; the project copy is never a resolution rung. Runs the fenced bash block from SKILL.md verbatim.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +31,14 @@ run() {
     CLAUDE_PROJECT_DIR="$c/project" CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post \
     PHASE="$c/phase" "$@" bash -c "${UNSET:+unset $UNSET;}$BLOCK" 2>/dev/null)
 }
+# run_err <case>: like run, but returns the block's stderr (rc preserved).
+run_err() {
+  local c="$SCRATCH/$1"
+  mkdir -p "$c/home" "$c/project" "$c/plugin" "$c/phase"
+  (cd "$c/project" && env HOME="$c/home" GSD_HOME="$c/home" \
+    CLAUDE_PROJECT_DIR="$c/project" CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post \
+    PHASE="$c/phase" bash -c "$BLOCK" 2>&1 >/dev/null)
+}
 cap() { echo "$SCRATCH/$1/$2/.gsd/capabilities/pr-workflow"; }
 
 # 1. Hostile project copy + global install: global runs, marker absent.
@@ -50,11 +58,14 @@ out="$(run p)"; rc=$?
 [ ! -e "$SCRATCH/marker" ] || fail "plugin only: project script ran"
 pass "plugin root wins over hostile project copy"
 
-# 3. Project-scope install only: project script runs.
-fake "$(cap o project)/scripts/pr_status.py" project
-out="$(run o)"; rc=$?
-[ "$rc" -eq 0 ] && [ "$out" = "project verify-post $SCRATCH/o/phase" ] || fail "project only: rc=$rc out=$out"
-pass "project copy used when it is the only install"
+# 3. Neither global install nor plugin root, hostile project copy: exit 1 with the not-found
+# message, project script never runs (no project rung).
+hostile "$(cap o project)/scripts/pr_status.py"
+err="$(run_err o)"; rc=$?
+[ "$rc" -eq 1 ] || fail "project only: rc=$rc (want 1)"
+case "$err" in *"pr_status.py not found in global or plugin roots"*) ;; *) fail "project only: message=$err";; esac
+[ ! -e "$SCRATCH/marker" ] || fail "project only: project script ran"
+pass "project copy never runs; missing global and plugin fails closed with message"
 
 # 4. Global manifest present, global script deleted: non-zero, never the project copy.
 G="$(cap d home)"
