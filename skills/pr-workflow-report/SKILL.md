@@ -25,8 +25,9 @@ workflow is running. When neither exists, print `pr-workflow: phase directory un
 # Trust order: global manifest, then plugin root. Never the project copy (a repo can plant it).
 _B="${GSD_HOME:-${HOME:-}}"; case "$_B" in /?*) ;; *) echo "pr-workflow: no absolute GSD_HOME/HOME" >&2; exit 1;; esac
 G="$_B/.gsd/capabilities/pr-workflow"
+_P="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts/pr_status.py}"; case "$_P" in /?*) ;; *) _P= ;; esac
 if [ -e "$G/capability.json" ] || [ -L "$G/capability.json" ]; then PR_PY="$G/scripts/pr_status.py"
-elif [ -f "${CLAUDE_PLUGIN_ROOT:-}/scripts/pr_status.py" ]; then PR_PY="$CLAUDE_PLUGIN_ROOT/scripts/pr_status.py"
+elif [ -f "$_P" ]; then PR_PY="$_P"
 else PR_PY=
 fi
 [ -f "$PR_PY" ] || { echo "pr-workflow: pr_status.py not found in global or plugin roots" >&2; exit 1; }

@@ -31,13 +31,13 @@ run() {
     CLAUDE_PROJECT_DIR="$c/project" CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post \
     PHASE="$c/phase" "$@" bash -c "${UNSET:+unset $UNSET;}$BLOCK" 2>/dev/null)
 }
-# run_err <case>: like run, but returns the block's stderr (rc preserved).
+# run_err <case> [VAR=value...]: like run, but returns the block's stderr (rc preserved).
 run_err() {
-  local c="$SCRATCH/$1"
+  local c="$SCRATCH/$1"; shift
   mkdir -p "$c/home" "$c/project" "$c/plugin" "$c/phase"
   (cd "$c/project" && env HOME="$c/home" GSD_HOME="$c/home" \
     CLAUDE_PROJECT_DIR="$c/project" CLAUDE_PLUGIN_ROOT="$c/plugin" SUB=verify-post \
-    PHASE="$c/phase" bash -c "$BLOCK" 2>&1 >/dev/null)
+    PHASE="$c/phase" "$@" bash -c "$BLOCK" 2>&1 >/dev/null)
 }
 cap() { echo "$SCRATCH/$1/$2/.gsd/capabilities/pr-workflow"; }
 
@@ -66,6 +66,14 @@ err="$(run_err o)"; rc=$?
 case "$err" in *"pr_status.py not found in global or plugin roots"*) ;; *) fail "project only: message=$err";; esac
 [ ! -e "$SCRATCH/marker" ] || fail "project only: project script ran"
 pass "project copy never runs; missing global and plugin fails closed with message"
+
+# 3b. Relative CLAUDE_PLUGIN_ROOT resolves against the project cwd: a planted ./scripts copy must not run.
+hostile "$SCRATCH/rp/project/scripts/pr_status.py"
+err="$(run_err rp CLAUDE_PLUGIN_ROOT=.)"; rc=$?
+[ "$rc" -eq 1 ] || fail "relative plugin root: rc=$rc (want 1)"
+case "$err" in *"pr_status.py not found in global or plugin roots"*) ;; *) fail "relative plugin root: message=$err";; esac
+[ ! -e "$SCRATCH/marker" ] || fail "relative plugin root: cwd script ran"
+pass "relative CLAUDE_PLUGIN_ROOT ignored; fails closed with message"
 
 # 4. Global manifest present, global script deleted: non-zero, never the project copy.
 G="$(cap d home)"
