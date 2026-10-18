@@ -1,7 +1,7 @@
 {
   "id": "pr-workflow",
   "role": "feature",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "title": "PR workflow",
   "description": "Reports PR/check status via gh into PR.md; advisory ship:pre gate on it.",
   "tier": "full",
